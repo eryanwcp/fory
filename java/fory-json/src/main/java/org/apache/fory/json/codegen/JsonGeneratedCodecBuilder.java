@@ -26,11 +26,10 @@ import java.lang.reflect.Method;
 import org.apache.fory.builder.CodecBuilder;
 import org.apache.fory.codegen.CodegenContext;
 import org.apache.fory.codegen.Expression;
-import org.apache.fory.json.ForyJsonException;
+import org.apache.fory.json.codec.JsonUnwrappedInfo.Declaration;
 import org.apache.fory.json.meta.JsonFieldInfo;
 import org.apache.fory.reflect.TypeRef;
 import org.apache.fory.type.Descriptor;
-import org.apache.fory.util.record.RecordUtils;
 
 /**
  * Common field-access and source-class builder for one concrete generated JSON capability.
@@ -88,7 +87,7 @@ final class JsonGeneratedCodecBuilder extends CodecBuilder {
   }
 
   private Descriptor writeDescriptor(Field field) {
-    return new Descriptor(field, TypeRef.of(field.getGenericType()), recordReadMethod(field), null);
+    return new Descriptor(field, TypeRef.of(field.getGenericType()), null, null);
   }
 
   private Descriptor readDescriptor(JsonFieldInfo property) {
@@ -97,17 +96,6 @@ final class JsonGeneratedCodecBuilder extends CodecBuilder {
 
   private Descriptor readDescriptor(Field field) {
     return new Descriptor(field, TypeRef.of(field.getGenericType()), null, null);
-  }
-
-  private Method recordReadMethod(Field field) {
-    if (!RecordUtils.isRecord(field.getDeclaringClass())) {
-      return null;
-    }
-    try {
-      return field.getDeclaringClass().getMethod(field.getName());
-    } catch (NoSuchMethodException e) {
-      throw new ForyJsonException("Cannot resolve record accessor for field " + field, e);
-    }
   }
 
   Expression fieldValue(JsonFieldInfo property, Expression object) {
@@ -128,6 +116,19 @@ final class JsonGeneratedCodecBuilder extends CodecBuilder {
 
   Expression anyValue(Field field, Expression object) {
     return getFieldValue(object, writeDescriptor(field));
+  }
+
+  Expression unwrappedValue(Declaration declaration, Expression object) {
+    Method getter = declaration.writeAccessor().getter();
+    if (getter != null) {
+      return new Expression.Invoke(
+          object,
+          getter.getName(),
+          declaration.javaName(),
+          TypeRef.of(getter.getGenericReturnType()),
+          false);
+    }
+    return getFieldValue(object, writeDescriptor(declaration.writeAccessor().field()));
   }
 
   Expression newObject() {
@@ -163,5 +164,22 @@ final class JsonGeneratedCodecBuilder extends CodecBuilder {
         object,
         readDescriptor(field),
         tryInlineCast(inline(value), TypeRef.of(field.getGenericType())));
+  }
+
+  Expression setUnwrapped(Declaration declaration, Expression object, Expression value) {
+    value = inline(value);
+    Method setter = declaration.readAccessor().setter();
+    if (setter != null) {
+      Class<?> rawType = setter.getParameterTypes()[0];
+      TypeRef<?> typeRef = TypeRef.of(setter.getGenericParameterTypes()[0]);
+      if (!rawType.isAssignableFrom(value.type().getRawType())) {
+        value = tryInlineCast(value, typeRef);
+      }
+      return new Expression.Invoke(object, setter.getName(), value);
+    }
+    return setFieldValue(
+        object,
+        readDescriptor(declaration.readAccessor().field()),
+        tryInlineCast(value, TypeRef.of(declaration.readAccessor().field().getGenericType())));
   }
 }

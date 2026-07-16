@@ -20,7 +20,6 @@
 package org.apache.fory.reflect;
 
 import java.lang.annotation.Annotation;
-import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import org.apache.fory.annotation.Internal;
@@ -55,28 +54,8 @@ public final class TypeUseMetadata {
     return SUPPORT.methodParameterTypeUses(method);
   }
 
-  public static Object[] constructorParameterTypeUses(Constructor<?> constructor) {
-    return SUPPORT.constructorParameterTypeUses(constructor);
-  }
-
   public static Object recordComponentTypeUse(RecordComponent component) {
     return SUPPORT.recordComponentTypeUse(component);
-  }
-
-  public static Object[] typeUseArguments(Object typeUse) {
-    return SUPPORT.typeUseArguments(typeUse);
-  }
-
-  public static Object arrayComponentTypeUse(Object typeUse) {
-    return SUPPORT.arrayComponentTypeUse(typeUse);
-  }
-
-  public static Object[] wildcardUpperBounds(Object typeUse) {
-    return SUPPORT.wildcardUpperBounds(typeUse);
-  }
-
-  public static Object[] wildcardLowerBounds(Object typeUse) {
-    return SUPPORT.wildcardLowerBounds(typeUse);
   }
 
   public static Annotation typeUseAnnotation(Object typeUse, String name) {
@@ -93,9 +72,15 @@ public final class TypeUseMetadata {
   }
 
   private static Support loadSupport() {
+    // ART can load JvmTypeUseMetadata while deferring linkage of missing type-use methods until
+    // their first invocation. Probe the API itself before selecting the implementation so Android
+    // API 26 never reaches those deferred references.
     try {
-      // Keep the JVM implementation loaded by name so Android/R8 can fall back before resolving
-      // JVM-only type-use descriptors from JvmTypeUseMetadata.
+      Field.class.getMethod("getAnnotatedType");
+    } catch (NoSuchMethodException | LinkageError e) {
+      return NoTypeUseSupport.INSTANCE;
+    }
+    try {
       String className = TypeUseMetadata.class.getPackage().getName() + ".Jvm" + "TypeUseMetadata";
       Class<?> cls = Class.forName(className, true, TypeUseMetadata.class.getClassLoader());
       return (Support) cls.getDeclaredConstructor().newInstance();
@@ -115,17 +100,7 @@ public final class TypeUseMetadata {
 
     Object[] methodParameterTypeUses(Method method);
 
-    Object[] constructorParameterTypeUses(Constructor<?> constructor);
-
     Object recordComponentTypeUse(RecordComponent component);
-
-    Object[] typeUseArguments(Object typeUse);
-
-    Object arrayComponentTypeUse(Object typeUse);
-
-    Object[] wildcardUpperBounds(Object typeUse);
-
-    Object[] wildcardLowerBounds(Object typeUse);
 
     Annotation typeUseAnnotation(Object typeUse, String name);
 
@@ -157,32 +132,7 @@ public final class TypeUseMetadata {
     }
 
     @Override
-    public Object[] constructorParameterTypeUses(Constructor<?> constructor) {
-      return null;
-    }
-
-    @Override
     public Object recordComponentTypeUse(RecordComponent component) {
-      return null;
-    }
-
-    @Override
-    public Object[] typeUseArguments(Object typeUse) {
-      return null;
-    }
-
-    @Override
-    public Object arrayComponentTypeUse(Object typeUse) {
-      return null;
-    }
-
-    @Override
-    public Object[] wildcardUpperBounds(Object typeUse) {
-      return null;
-    }
-
-    @Override
-    public Object[] wildcardLowerBounds(Object typeUse) {
       return null;
     }
 

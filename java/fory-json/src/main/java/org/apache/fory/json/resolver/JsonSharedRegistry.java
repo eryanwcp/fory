@@ -20,8 +20,13 @@
 package org.apache.fory.json.resolver;
 
 import java.io.File;
+import java.lang.invoke.MethodHandle;
 import java.lang.reflect.Constructor;
+import java.lang.reflect.Executable;
+import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Member;
+import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.math.BigDecimal;
 import java.math.BigInteger;
@@ -60,6 +65,7 @@ import java.util.Comparator;
 import java.util.Currency;
 import java.util.Date;
 import java.util.Deque;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.IdentityHashMap;
 import java.util.List;
@@ -82,6 +88,8 @@ import java.util.concurrent.atomic.AtomicLongArray;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.AtomicReferenceArray;
 import java.util.regex.Pattern;
+import org.apache.fory.annotation.Internal;
+import org.apache.fory.codegen.GeneratedClassNames;
 import org.apache.fory.exception.InsecureException;
 import org.apache.fory.json.ForyJsonException;
 import org.apache.fory.json.JsonConfig;
@@ -91,26 +99,33 @@ import org.apache.fory.json.PropertyNamingStrategy;
 import org.apache.fory.json.annotation.JsonCodec;
 import org.apache.fory.json.annotation.JsonSubTypes;
 import org.apache.fory.json.annotation.JsonSubTypes.Inclusion;
+import org.apache.fory.json.annotation.JsonType;
 import org.apache.fory.json.codec.ArrayCodec;
 import org.apache.fory.json.codec.CodecUtils;
 import org.apache.fory.json.codec.CollectionCodec;
+import org.apache.fory.json.codec.GeneratedJsonCodec;
+import org.apache.fory.json.codec.GeneratedJsonCodecFactory;
 import org.apache.fory.json.codec.GuavaCodecs;
 import org.apache.fory.json.codec.JsonSubTypesInfo;
 import org.apache.fory.json.codec.JsonValueCodec;
 import org.apache.fory.json.codec.MapCodec;
+import org.apache.fory.json.codec.MapKeyCodec;
 import org.apache.fory.json.codec.ScalarCodecs;
 import org.apache.fory.json.codec.SqlJsonCodecs;
 import org.apache.fory.json.codegen.JsonCodegen;
 import org.apache.fory.json.codegen.JsonJITContext;
+import org.apache.fory.json.meta.JsonAnySetterAccessor;
+import org.apache.fory.json.meta.JsonFieldAccessor;
 import org.apache.fory.json.meta.JsonFieldKind;
-import org.apache.fory.json.meta.JsonTypeUse;
 import org.apache.fory.platform.AndroidSupport;
 import org.apache.fory.platform.GraalvmSupport;
+import org.apache.fory.reflect.ReflectionUtils;
 import org.apache.fory.reflect.TypeRef;
 import org.apache.fory.resolver.DisallowedList;
 import org.apache.fory.type.BFloat16;
 import org.apache.fory.type.Float16;
 import org.apache.fory.type.TypeUtils;
+import org.apache.fory.util.record.RecordUtils;
 
 /**
  * Shared codec definitions and cold caches for all local resolvers of one {@code ForyJson}.
@@ -123,13 +138,12 @@ import org.apache.fory.type.TypeUtils;
  *
  * <p>Accepted type-check results are cached by class name up to a bounded 8192-entry shared cache.
  * Once full, new names are checked on every resolution rather than growing attacker-controlled
- * state. Generated classes are shared through one {@link JsonCodegen}; generated instances,
- * ordinary type bindings, JIT locks, and callbacks remain resolver-local. A fresh generic {@link
- * JsonJITContext} is therefore created for every pooled JSON state.
+ * state. Source-generated model companions and JIT-generated classes are shared here; concrete JIT
+ * codec instances, ordinary type bindings, JIT locks, and callbacks remain resolver-local. A fresh
+ * generic {@link JsonJITContext} is therefore created for every pooled JSON state.
  */
 public final class JsonSharedRegistry {
   private static final int TYPE_CHECK_CACHE_LIMIT = 8192;
-  private static final boolean CODEC_ANNOTATIONS_ENABLED = !AndroidSupport.IS_ANDROID;
   private static final Comparator<DeclarationCandidate> DECLARATION_ORDER =
       new Comparator<DeclarationCandidate>() {
         @Override
@@ -158,8 +172,13 @@ public final class JsonSharedRegistry {
   private final IdentityHashMap<Class<?>, JsonSubTypesInfo> subTypesCache;
   private final IdentityHashMap<Class<?>, JsonCodecDeclaration> codecDeclarations;
   private final Set<Class<?>> typesWithoutCodecDeclaration;
+  private final IdentityHashMap<Class<?>, JsonValueDeclaration> valueDeclarations;
+  private final Set<Class<?>> typesWithoutValueDeclaration;
   private final ConcurrentHashMap<Class<? extends JsonValueCodec<?>>, JsonValueCodec<?>>
       annotationCodecs;
+  private final ConcurrentHashMap<Class<? extends MapKeyCodec>, MapKeyCodec> mapKeyCodecs;
+  private final ConcurrentHashMap<Class<?>, GeneratedJsonCodec<?>> generatedCodecs;
+  private final Set<Class<?>> typesWithoutGeneratedCodec;
 
   public JsonSharedRegistry(JsonConfig config) {
     this(config, null);
@@ -180,12 +199,357 @@ public final class JsonSharedRegistry {
     codecDeclarations = new IdentityHashMap<>();
     typesWithoutCodecDeclaration =
         Collections.newSetFromMap(new IdentityHashMap<Class<?>, Boolean>());
+    valueDeclarations = new IdentityHashMap<>();
+    typesWithoutValueDeclaration =
+        Collections.newSetFromMap(new IdentityHashMap<Class<?>, Boolean>());
     annotationCodecs = new ConcurrentHashMap<>();
+    mapKeyCodecs = new ConcurrentHashMap<>();
+    generatedCodecs = new ConcurrentHashMap<>();
+    typesWithoutGeneratedCodec = ConcurrentHashMap.newKeySet();
     boolean codegenEnabled = config.codegenEnabled();
     codegen = codegenEnabled ? new JsonCodegen(config.getCodegenHash(), classLoader) : null;
     asyncCompilationEnabled = codegenEnabled && config.asyncCompilationEnabled();
     this.compilationService = compilationService;
     registerExactCodecs();
+  }
+
+  GeneratedJsonCodec<?> generatedCodec(Class<?> type) {
+    if (type.getDeclaredAnnotation(JsonType.class) == null) {
+      return null;
+    }
+    GeneratedJsonCodec<?> codec = generatedCodecIfPresent(type);
+    if (codec == null) {
+      throw new ForyJsonException(
+          "Missing generated JSON codec "
+              + generatedCodecBinaryName(type)
+              + " for @JsonType object model "
+              + type.getName()
+              + "; enable the Fory annotation processor and preserve its generated R8 rules");
+    }
+    return codec;
+  }
+
+  private GeneratedJsonCodec<?> generatedCodecIfPresent(Class<?> type) {
+    GeneratedJsonCodec<?> codec = generatedCodecs.get(type);
+    if (codec != null) {
+      return codec;
+    }
+    if (!typesWithoutGeneratedCodec.contains(type)) {
+      synchronized (generatedCodecs) {
+        codec = generatedCodecs.get(type);
+        if (codec == null && !typesWithoutGeneratedCodec.contains(type)) {
+          codec = loadGeneratedCodec(type);
+          if (codec == null) {
+            typesWithoutGeneratedCodec.add(type);
+          } else {
+            generatedCodecs.put(type, codec);
+          }
+        }
+      }
+    }
+    return codec;
+  }
+
+  private GeneratedJsonCodec<?> loadGeneratedCodec(Class<?> type) {
+    if (GraalvmSupport.isGraalRuntime()) {
+      GeneratedJsonCodecFactory factory = GeneratedJsonCodecFactories.get(type);
+      return factory == null ? null : validateGeneratedCodec(type, factory.create());
+    }
+    String generatedName = generatedCodecBinaryName(type);
+    Class<?> generatedClass;
+    try {
+      generatedClass = Class.forName(generatedName, false, type.getClassLoader());
+    } catch (ClassNotFoundException e) {
+      return null;
+    } catch (LinkageError e) {
+      throw new ForyJsonException("Cannot load generated JSON codec " + generatedName, e);
+    }
+    if (!GeneratedJsonCodec.class.isAssignableFrom(generatedClass)) {
+      throw new ForyJsonException(
+          "Generated JSON codec "
+              + generatedName
+              + " does not extend "
+              + GeneratedJsonCodec.class.getName());
+    }
+    @SuppressWarnings("unchecked")
+    Class<? extends GeneratedJsonCodec<?>> codecClass =
+        (Class<? extends GeneratedJsonCodec<?>>)
+            generatedClass.asSubclass(GeneratedJsonCodec.class);
+    return validateGeneratedCodec(type, newGeneratedCodec(codecClass));
+  }
+
+  private static GeneratedJsonCodec<?> newGeneratedCodec(
+      Class<? extends GeneratedJsonCodec<?>> codecClass) {
+    Constructor<? extends GeneratedJsonCodec<?>> publicConstructor;
+    try {
+      publicConstructor = codecClass.getConstructor();
+    } catch (NoSuchMethodException e) {
+      throw new ForyJsonException(
+          "Generated JSON codec must declare a public no-argument constructor: "
+              + codecClass.getName(),
+          e);
+    }
+    if (!Modifier.isPublic(codecClass.getModifiers())) {
+      throw new ForyJsonException("Generated JSON codec must be public: " + codecClass.getName());
+    }
+    if (AndroidSupport.IS_ANDROID) {
+      try {
+        return publicConstructor.newInstance();
+      } catch (ReflectiveOperationException e) {
+        throw new ForyJsonException(
+            "Cannot construct generated JSON codec " + codecClass.getName(), unwrap(e));
+      }
+    }
+    try {
+      // Generated companions may live in named application modules that are not opened to Fory.
+      // The trusted handle is used only once while the shared registry publishes the companion.
+      MethodHandle constructor = ReflectionUtils.getCtrHandle(codecClass);
+      return (GeneratedJsonCodec<?>) constructor.invoke();
+    } catch (Throwable e) {
+      throw new ForyJsonException(
+          "Cannot construct generated JSON codec " + codecClass.getName(), unwrap(e));
+    }
+  }
+
+  /** Validates and initializes a source-generated codec before shared publication. */
+  @Internal
+  public static GeneratedJsonCodec<?> validateGeneratedCodec(
+      Class<?> type, GeneratedJsonCodec<?> codec) {
+    if (codec == null) {
+      throw new ForyJsonException(
+          "Generated JSON codec factory returned null for " + type.getName());
+    }
+    Class<?> declaredType;
+    JsonFieldAccessor[] accessors;
+    JsonAnySetterAccessor anySetter;
+    String[] creatorNames;
+    Class<?>[] creatorTypes;
+    String creatorFactory;
+    boolean record;
+    try {
+      declaredType = codec.type();
+      accessors = codec.fieldAccessors();
+      anySetter = codec.anySetterAccessor();
+      creatorNames = codec.creatorParameterNames();
+      creatorTypes = codec.creatorParameterTypes();
+      creatorFactory = codec.creatorFactoryName();
+      record = codec.isRecord();
+    } catch (RuntimeException | LinkageError e) {
+      throw new ForyJsonException(
+          "Cannot read generated JSON codec metadata for " + type.getName(), e);
+    }
+    if (declaredType != type) {
+      throw invalidGeneratedCodec(type, "type() must return the exact model class");
+    }
+    if (accessors == null) {
+      throw invalidGeneratedCodec(type, "fieldAccessors() returned null");
+    }
+    Map<Member, JsonFieldAccessor> memberAccessors = new HashMap<>();
+    for (JsonFieldAccessor accessor : accessors) {
+      validateGeneratedAccessor(type, accessor, memberAccessors);
+    }
+    Method anySetterMethod = anySetter == null ? null : validateGeneratedAnySetter(type, anySetter);
+    Executable creator =
+        validateGeneratedCreator(
+            type, memberAccessors, creatorNames, creatorTypes, creatorFactory, record);
+    if (!AndroidSupport.IS_ANDROID
+        && !GraalvmSupport.IN_GRAALVM_NATIVE_IMAGE
+        && RecordUtils.isRecord(type) != record) {
+      throw invalidGeneratedCodec(type, "isRecord() does not match the runtime model class");
+    }
+    codec.initializeValidated(
+        memberAccessors,
+        anySetter,
+        anySetterMethod,
+        creatorNames,
+        creatorTypes,
+        creatorFactory,
+        creator,
+        record);
+    return codec;
+  }
+
+  private static void validateGeneratedAccessor(
+      Class<?> type, JsonFieldAccessor accessor, Map<Member, JsonFieldAccessor> memberAccessors) {
+    if (accessor == null) {
+      throw invalidGeneratedCodec(type, "fieldAccessors() contains null");
+    }
+    Field field = accessor.field();
+    Method getter = accessor.getter();
+    Method setter = accessor.setter();
+    int memberCount = (field == null ? 0 : 1) + (getter == null ? 0 : 1) + (setter == null ? 0 : 1);
+    if (memberCount != 1) {
+      throw invalidGeneratedCodec(type, "each field accessor must identify exactly one member");
+    }
+    Member member = field != null ? field : getter != null ? getter : setter;
+    if (!member.getDeclaringClass().isAssignableFrom(type)
+        || Modifier.isStatic(member.getModifiers())) {
+      throw invalidGeneratedCodec(type, "field accessor does not belong to the model hierarchy");
+    }
+    if (field != null
+        && (field.isSynthetic()
+            || Modifier.isTransient(field.getModifiers())
+            || field.getType() == Class.class)) {
+      throw invalidGeneratedCodec(type, "generated field is not an eligible JSON member");
+    }
+    if (member instanceof Method
+        && (((Method) member).isSynthetic() || ((Method) member).isBridge())) {
+      throw invalidGeneratedCodec(type, "generated method is not an eligible JSON member");
+    }
+    if (getter != null
+        && (getter.getParameterCount() != 0 || getter.getReturnType() == void.class)) {
+      throw invalidGeneratedCodec(type, "generated getter has an invalid signature");
+    }
+    if (setter != null
+        && (setter.getParameterCount() != 1 || setter.getReturnType() != void.class)) {
+      throw invalidGeneratedCodec(type, "generated setter has an invalid signature");
+    }
+    if (memberAccessors.put(member, accessor) != null) {
+      throw invalidGeneratedCodec(type, "duplicate generated accessor for " + member);
+    }
+  }
+
+  private static Method validateGeneratedAnySetter(Class<?> type, JsonAnySetterAccessor accessor) {
+    Method method = accessor.setter();
+    if (method == null
+        || !method.getDeclaringClass().isAssignableFrom(type)
+        || !Modifier.isPublic(method.getModifiers())
+        || Modifier.isStatic(method.getModifiers())
+        || method.isSynthetic()
+        || method.isBridge()
+        || method.isVarArgs()
+        || method.getTypeParameters().length != 0
+        || method.getReturnType() != void.class
+        || method.getParameterCount() != 2
+        || method.getParameterTypes()[0] != String.class) {
+      throw invalidGeneratedCodec(type, "generated any setter has an invalid signature");
+    }
+    return method;
+  }
+
+  private static Executable validateGeneratedCreator(
+      Class<?> type,
+      Map<Member, JsonFieldAccessor> memberAccessors,
+      String[] creatorNames,
+      Class<?>[] creatorTypes,
+      String creatorFactory,
+      boolean record) {
+    if ((creatorNames == null) != (creatorTypes == null)) {
+      throw invalidGeneratedCodec(
+          type, "creator names and parameter types must both be null or non-null");
+    }
+    if (creatorNames == null) {
+      if (creatorFactory != null || record) {
+        throw invalidGeneratedCodec(type, "creator metadata is incomplete");
+      }
+      return null;
+    }
+    if (record && creatorFactory != null) {
+      throw invalidGeneratedCodec(type, "a Record creator must be a constructor");
+    }
+    if (creatorNames.length != creatorTypes.length) {
+      throw invalidGeneratedCodec(type, "creator name and parameter type counts differ");
+    }
+    Set<String> names = new HashSet<>();
+    for (int i = 0; i < creatorNames.length; i++) {
+      if (creatorNames[i] == null
+          || creatorNames[i].isEmpty()
+          || !names.add(creatorNames[i])
+          || creatorTypes[i] == null
+          || creatorTypes[i] == void.class) {
+        throw invalidGeneratedCodec(type, "invalid generated creator parameter at index " + i);
+      }
+    }
+    if (creatorFactory != null && creatorFactory.isEmpty()) {
+      throw invalidGeneratedCodec(type, "creator factory name must not be empty");
+    }
+    Executable creator;
+    if (creatorFactory == null) {
+      Constructor<?> constructor;
+      try {
+        constructor = type.getDeclaredConstructor(creatorTypes);
+      } catch (NoSuchMethodException e) {
+        throw invalidGeneratedCodec(type, "creator constructor signature does not exist");
+      }
+      if (!record) {
+        validateGeneratedExecutable(type, constructor);
+      }
+      creator = constructor;
+    } else {
+      Method factory;
+      try {
+        factory = type.getDeclaredMethod(creatorFactory, creatorTypes);
+      } catch (NoSuchMethodException e) {
+        throw invalidGeneratedCodec(type, "creator factory signature does not exist");
+      }
+      validateGeneratedExecutable(type, factory);
+      if (!Modifier.isStatic(factory.getModifiers()) || factory.getReturnType() != type) {
+        throw invalidGeneratedCodec(
+            type, "creator factory must be static and return the model type");
+      }
+      creator = factory;
+    }
+    if (record) {
+      validateGeneratedRecordAccessors(type, memberAccessors, creatorNames, creatorTypes);
+    }
+    return creator;
+  }
+
+  private static void validateGeneratedExecutable(Class<?> type, Executable creator) {
+    int modifiers = creator.getModifiers();
+    if (!Modifier.isPublic(modifiers)
+        || creator.isSynthetic()
+        || creator.isVarArgs()
+        || creator.getParameterCount() == 0
+        || creator.getTypeParameters().length != 0
+        || creator instanceof Method && ((Method) creator).isBridge()) {
+      throw invalidGeneratedCodec(type, "creator executable has an invalid shape");
+    }
+  }
+
+  private static void validateGeneratedRecordAccessors(
+      Class<?> type,
+      Map<Member, JsonFieldAccessor> memberAccessors,
+      String[] componentNames,
+      Class<?>[] componentTypes) {
+    for (int i = 0; i < componentNames.length; i++) {
+      Method getter;
+      try {
+        getter = type.getDeclaredMethod(componentNames[i]);
+      } catch (NoSuchMethodException e) {
+        throw invalidGeneratedCodec(type, "Record component getter does not exist at index " + i);
+      }
+      JsonFieldAccessor accessor = memberAccessors.get(getter);
+      if (getter.getReturnType() != componentTypes[i]
+          || getter.getParameterCount() != 0
+          || accessor == null
+          || !getter.equals(accessor.getter())) {
+        throw invalidGeneratedCodec(type, "invalid generated Record accessor at index " + i);
+      }
+    }
+  }
+
+  private static ForyJsonException invalidGeneratedCodec(Class<?> type, String reason) {
+    return new ForyJsonException(
+        "Invalid generated JSON codec for " + type.getName() + ": " + reason);
+  }
+
+  private static Throwable unwrap(Throwable throwable) {
+    return throwable instanceof InvocationTargetException
+        ? ((InvocationTargetException) throwable).getCause()
+        : throwable;
+  }
+
+  /** Returns the deterministic companion binary name for one model class. */
+  @Internal
+  public static String generatedCodecBinaryName(Class<?> type) {
+    return generatedCodecBinaryName(type.getName());
+  }
+
+  /** Returns the deterministic companion binary name for one model binary name. */
+  @Internal
+  public static String generatedCodecBinaryName(String binaryName) {
+    return GeneratedClassNames.withSuffix(binaryName, "_ForyJsonCodec");
   }
 
   public JsonValueCodec<?> createCodec(
@@ -255,42 +619,6 @@ public final class JsonSharedRegistry {
       return MapCodec.create(rawType, typeRef, localResolver);
     }
     return null;
-  }
-
-  JsonValueCodec<?> createCodec(JsonTypeUse typeUse, JsonTypeResolver localResolver) {
-    Class<?> rawType = typeUse.rawType();
-    if (rawType.isArray()) {
-      JsonTypeUse component = typeUse.arrayComponent();
-      return ArrayCodec.create(rawType, localResolver.getTypeInfo(component));
-    }
-    if (rawType == Optional.class) {
-      return new ScalarCodecs.OptionalCodec(localResolver.getTypeInfo(typeUse.argument(0)));
-    }
-    if (rawType == AtomicReference.class) {
-      return new ScalarCodecs.AtomicReferenceCodec(localResolver.getTypeInfo(typeUse.argument(0)));
-    }
-    if (rawType == AtomicReferenceArray.class) {
-      return new ScalarCodecs.AtomicReferenceArrayCodec(
-          localResolver.getTypeInfo(typeUse.argument(0)));
-    }
-    if (Collection.class.isAssignableFrom(rawType)) {
-      JsonTypeUse collection = typeUse.projectTo(Collection.class, rawType.getTypeName());
-      JsonTypeUse element = collection.argument(0);
-      return CollectionCodec.create(rawType, element.rawType(), localResolver.getTypeInfo(element));
-    }
-    if (Map.class.isAssignableFrom(rawType)) {
-      JsonTypeUse map = typeUse.projectTo(Map.class, rawType.getTypeName());
-      JsonTypeUse key = map.argument(0);
-      key.rejectMapKey(rawType.getTypeName());
-      localResolver.checkMapKeySecure(key.rawType());
-      JsonTypeUse value = map.argument(1);
-      return MapCodec.create(rawType, key.rawType(), localResolver.getTypeInfo(value));
-    }
-    JsonValueCodec<?> codec = createCodec(rawType, TypeRef.of(typeUse.type()), localResolver);
-    if (codec != null) {
-      typeUse.rejectExplicitDescendants(rawType.getTypeName());
-    }
-    return codec;
   }
 
   public JsonFieldKind kind(Class<?> type) {
@@ -370,7 +698,7 @@ public final class JsonSharedRegistry {
   }
 
   JsonCodecDeclaration codecDeclaration(Class<?> targetType) {
-    if (!CODEC_ANNOTATIONS_ENABLED || targetType.isAnnotation()) {
+    if (targetType.isAnnotation()) {
       return null;
     }
     synchronized (codecDeclarations) {
@@ -391,10 +719,41 @@ public final class JsonSharedRegistry {
     }
   }
 
+  JsonValueDeclaration valueDeclaration(Class<?> targetType) {
+    if (targetType.isAnnotation()) {
+      return null;
+    }
+    synchronized (valueDeclarations) {
+      JsonValueDeclaration cached = valueDeclarations.get(targetType);
+      if (cached != null) {
+        return cached;
+      }
+      if (typesWithoutValueDeclaration.contains(targetType)) {
+        return null;
+      }
+      GeneratedJsonCodec<?> generatedCodec =
+          targetType.getDeclaredAnnotation(JsonType.class) == null
+              ? null
+              : generatedCodecIfPresent(targetType);
+      JsonValueDeclaration resolved = JsonValueDeclaration.resolve(targetType, generatedCodec);
+      if (resolved == null) {
+        typesWithoutValueDeclaration.add(targetType);
+      } else {
+        valueDeclarations.put(targetType, resolved);
+      }
+      return resolved;
+    }
+  }
+
   JsonValueCodec<?> annotationCodec(
       Class<?> targetType, Class<? extends JsonValueCodec<?>> codecClass) {
     checkCustomSecure(targetType);
     return annotationCodecs.computeIfAbsent(codecClass, JsonSharedRegistry::newAnnotationCodec);
+  }
+
+  MapKeyCodec mapKeyCodec(Class<?> targetType, Class<? extends MapKeyCodec> codecClass) {
+    checkMapKeySecure(targetType);
+    return mapKeyCodecs.computeIfAbsent(codecClass, JsonSharedRegistry::newMapKeyCodec);
   }
 
   private JsonCodecDeclaration resolveCodecDeclaration(Class<?> targetType) {
@@ -484,8 +843,22 @@ public final class JsonSharedRegistry {
       return null;
     }
     try {
-      return new DeclarationCandidate(declarationType, annotation.value());
+      Class<? extends JsonValueCodec<?>> codecClass = annotation.value();
+      if (codecClass == JsonCodec.NoJsonValueCodec.class
+          || annotation.elementCodec() != JsonCodec.NoJsonValueCodec.class
+          || annotation.contentCodec() != JsonCodec.NoJsonValueCodec.class
+          || annotation.keyCodec() != JsonCodec.NoMapKeyCodec.class
+          || annotation.valueCodec() != JsonCodec.NoJsonValueCodec.class) {
+        throw new ForyJsonException(
+            "@JsonCodec on type "
+                + declarationType.getName()
+                + " must set only the complete value codec");
+      }
+      return new DeclarationCandidate(declarationType, codecClass);
     } catch (RuntimeException | LinkageError e) {
+      if (e instanceof ForyJsonException) {
+        throw (ForyJsonException) e;
+      }
       throw new ForyJsonException(
           "Cannot resolve @JsonCodec declared on " + declarationType.getName(), e);
     }
@@ -508,7 +881,7 @@ public final class JsonSharedRegistry {
     message
         .append(" declare @JsonCodec on ")
         .append(targetType.getName())
-        .append(", annotate the current type use, or register an exact codec for ")
+        .append(" or register an exact codec for ")
         .append(targetType.getName())
         .append(".");
     return new ForyJsonException(message.toString());
@@ -516,16 +889,24 @@ public final class JsonSharedRegistry {
 
   private static JsonValueCodec<?> newAnnotationCodec(
       Class<? extends JsonValueCodec<?>> codecClass) {
-    validateCodecClass(codecClass);
-    Constructor<? extends JsonValueCodec<?>> constructor;
+    return newCodec(codecClass, "JSON codec");
+  }
+
+  private static MapKeyCodec newMapKeyCodec(Class<? extends MapKeyCodec> codecClass) {
+    return newCodec(codecClass, "JSON map key codec");
+  }
+
+  private static <T> T newCodec(Class<? extends T> codecClass, String role) {
+    validateCodecClass(codecClass, role);
+    Constructor<? extends T> constructor;
     try {
       constructor = codecClass.getConstructor();
     } catch (NoSuchMethodException e) {
-      throw invalidCodecClass(codecClass, "must have a public no-argument constructor", e);
+      throw invalidCodecClass(codecClass, role, "must have a public no-argument constructor", e);
     } catch (SecurityException e) {
-      throw inaccessibleCodecClass(codecClass, e);
+      throw inaccessibleCodecClass(codecClass, role, e);
     } catch (LinkageError e) {
-      throw invalidCodecClass(codecClass, "constructor cannot be inspected", e);
+      throw invalidCodecClass(codecClass, role, "constructor cannot be inspected", e);
     }
     try {
       return constructor.newInstance();
@@ -537,46 +918,48 @@ public final class JsonSharedRegistry {
         constructor.setAccessible(true);
         return constructor.newInstance();
       } catch (InvocationTargetException retryFailure) {
-        throw invalidCodecClass(codecClass, "constructor failed", retryFailure.getCause());
+        throw invalidCodecClass(codecClass, role, "constructor failed", retryFailure.getCause());
       } catch (ReflectiveOperationException | LinkageError | RuntimeException retryFailure) {
-        throw inaccessibleCodecClass(codecClass, retryFailure);
+        throw inaccessibleCodecClass(codecClass, role, retryFailure);
       }
     } catch (InvocationTargetException e) {
-      throw invalidCodecClass(codecClass, "constructor failed", e.getCause());
+      throw invalidCodecClass(codecClass, role, "constructor failed", e.getCause());
     } catch (ReflectiveOperationException | LinkageError e) {
-      throw invalidCodecClass(codecClass, "cannot be constructed", e);
+      throw invalidCodecClass(codecClass, role, "cannot be constructed", e);
     } catch (RuntimeException e) {
-      throw invalidCodecClass(codecClass, "cannot be constructed", e);
+      throw invalidCodecClass(codecClass, role, "cannot be constructed", e);
     }
   }
 
-  private static void validateCodecClass(Class<? extends JsonValueCodec<?>> codecClass) {
+  private static void validateCodecClass(Class<?> codecClass, String role) {
     int modifiers = codecClass.getModifiers();
     if (!Modifier.isPublic(modifiers)) {
-      throw invalidCodecClass(codecClass, "must be public", null);
+      throw invalidCodecClass(codecClass, role, "must be public", null);
     }
     if (codecClass.isInterface() || Modifier.isAbstract(modifiers)) {
-      throw invalidCodecClass(codecClass, "must be concrete", null);
+      throw invalidCodecClass(codecClass, role, "must be concrete", null);
     }
     if (codecClass.getEnclosingClass() != null
         && (!codecClass.isMemberClass() || !Modifier.isStatic(modifiers))) {
-      throw invalidCodecClass(codecClass, "must be top-level or a static nested class", null);
+      throw invalidCodecClass(codecClass, role, "must be top-level or a static nested class", null);
     }
     for (Class<?> enclosing = codecClass.getEnclosingClass();
         enclosing != null;
         enclosing = enclosing.getEnclosingClass()) {
       if (!Modifier.isPublic(enclosing.getModifiers())) {
-        throw invalidCodecClass(codecClass, "must be enclosed only by public classes", null);
+        throw invalidCodecClass(codecClass, role, "must be enclosed only by public classes", null);
       }
     }
   }
 
   private static ForyJsonException inaccessibleCodecClass(
-      Class<? extends JsonValueCodec<?>> codecClass, Throwable cause) {
+      Class<?> codecClass, String role, Throwable cause) {
     Package codecPackage = codecClass.getPackage();
     String packageName = codecPackage == null ? "the unnamed package" : codecPackage.getName();
     return new ForyJsonException(
-        "Cannot access the public no-argument constructor of JSON codec "
+        "Cannot access the public no-argument constructor of "
+            + role
+            + ' '
             + codecClass.getName()
             + "; export or open package "
             + packageName
@@ -585,8 +968,8 @@ public final class JsonSharedRegistry {
   }
 
   private static ForyJsonException invalidCodecClass(
-      Class<? extends JsonValueCodec<?>> codecClass, String reason, Throwable cause) {
-    String message = "JSON codec " + codecClass.getName() + ' ' + reason + '.';
+      Class<?> codecClass, String role, String reason, Throwable cause) {
+    String message = role + ' ' + codecClass.getName() + ' ' + reason + '.';
     return cause == null ? new ForyJsonException(message) : new ForyJsonException(message, cause);
   }
 

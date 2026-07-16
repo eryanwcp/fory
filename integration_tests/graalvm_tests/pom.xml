@@ -95,6 +95,13 @@
         <configuration>
           <source>${maven.compiler.source}</source>
           <target>${maven.compiler.source}</target>
+          <annotationProcessorPaths>
+            <path>
+              <groupId>org.apache.fory</groupId>
+              <artifactId>fory-annotation-processor</artifactId>
+              <version>${project.version}</version>
+            </path>
+          </annotationProcessorPaths>
         </configuration>
       </plugin>
 
@@ -281,6 +288,8 @@
                   <executable>native-image</executable>
                   <arguments>
                     <argument>--no-fallback</argument>
+                    <!-- These images verify native-image compatibility, not runtime performance. -->
+                    <argument>-O1</argument>
                     <argument>-H:+UnlockExperimentalVMOptions</argument>
                     <argument>-o</argument>
                     <argument>${project.build.directory}/${moduleImageName}</argument>

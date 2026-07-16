@@ -356,18 +356,24 @@ operation. Apply request/body size limits at the transport boundary when parsing
 
 Builder mutation after `build()` does not modify an existing `ForyJson` runtime.
 
-In a GraalVM native image, runtime code generation and asynchronous compilation are automatically
-disabled. Every other builder option keeps the behavior described above.
+On Android and in a GraalVM native image, runtime code generation and asynchronous compilation are
+automatically disabled. Every other builder option keeps the behavior described above.
 
 ## JSON annotations
 
-Fory JSON defines ten annotations in `org.apache.fory.json.annotation`, including `JsonCodec` for
-complete-value codec selection and `JsonType` for GraalVM Native Image model metadata. They are Fory
-JSON APIs, not Jackson, Gson, or Fory binary-protocol compatibility annotations.
+Fory JSON defines fourteen annotations in `org.apache.fory.json.annotation`, including `JsonCodec` for
+complete-value codec selection and `JsonType` for generated model execution and retention.
+They are Fory JSON APIs, not Jackson, Gson, or Fory binary-protocol compatibility annotations.
 
-`JsonType` has no effect on ordinary JVM JSON behavior and is not inherited. Add it to every
-reachable object model used by a native executable. See the
-[GraalVM guide](../../docs/guide/java/graalvm-support.md) for the complete workflow.
+`JsonType` asks the annotation processor to generate direct property and creator operations plus
+exact retention rules. It is not inherited, so annotate each eligible concrete model that needs a
+generated companion. A directly annotated `JsonValue` Record also receives a companion for its
+value accessor and canonical constructor. Ordinary unannotated classes may still use reflection; on
+Android they need application-authored exact R8 rules. Android-desugared Records require `JsonType`
+and the processor. A directly annotated model that uses the default object codec fails during codec
+creation if its generated companion is missing.
+See the [GraalVM guide](../../docs/guide/java/graalvm-support.md) and
+[Android guide](../../docs/guide/java/android-support.md) for the platform workflows.
 
 ### `JsonProperty`
 
@@ -456,6 +462,9 @@ no declaration, the nearest superclass declaration is used and resolved against 
 properties. Interface declarations are not considered. Ordering affects serialization only;
 deserialization remains name-based, and subtype discriminators remain before user properties.
 
+An unwrapped group also occupies one position, selected by the group's Java logical property name.
+Its child members remain adjacent and retain the child's own order.
+
 A write-enabled `JsonAnyProperty` or `JsonAnyGetter` participates as one position identified by its
 Java logical property name. The position emits all dynamic entries in Map iteration order:
 
@@ -518,6 +527,158 @@ private String serverManagedValue;
 
 Both flags default to true. A same-named getter or setter cannot restore an ignored direction, and
 `JsonProperty` cannot override it. Fory core's `Expose` annotation has no effect in Fory JSON.
+
+### `JsonValue`
+
+`JsonValue` selects one exact `String` field or public zero-argument method as the complete JSON
+representation of its owning type. Fory writes the selected value as an ordinary JSON string, with
+quotes and normal escaping, instead of writing the owning object's properties:
+
+```java
+import org.apache.fory.json.annotation.JsonCreator;
+import org.apache.fory.json.annotation.JsonValue;
+
+public final class UserId {
+  private final String value;
+
+  @JsonCreator
+  public UserId(String value) {
+    this.value = value;
+  }
+
+  @JsonValue
+  public String value() {
+    return value;
+  }
+}
+```
+
+`json.toJson(new UserId("user-1"))` returns `"user-1"`. The method need not use a JavaBean getter
+name. It must be public, non-static, zero-argument, and return exactly `String`; a field must be an
+eligible non-static instance field. One type may have only one effective value member. An
+unannotated method override suppresses an inherited declaration.
+
+`JsonValue` controls serialization by itself. Deserialization additionally requires a
+`JsonCreator` constructor or public static factory with exactly one `String` parameter, an empty
+`JsonCreator.value()`, and no `JsonProperty` on that parameter. Fory recognizes that shape as the
+reverse String constructor; no creator mode is needed. Existing property-list and parameter-local
+creator forms are unchanged. Without the matching creator, writing still works and reading the
+owning type fails clearly.
+
+A null owner is written and read as JSON `null` without invoking either member or creator. A
+non-null owner whose value member returns null is also written as JSON `null`. `JsonValue` does not
+change Map key encoding.
+
+### `JsonRawValue`
+
+`JsonRawValue` marks one fixed ordinary `String` property. Fory writes the String directly at the
+value position without quotes, escaping, parsing, or validation:
+
+```java
+import org.apache.fory.json.annotation.JsonRawValue;
+
+public final class Response {
+  public int status;
+
+  @JsonRawValue
+  public String body;
+}
+```
+
+With `status = 200` and `body = "{\"id\":1}"`, the output contains
+`{"status":200,"body":{"id":1}}`. The raw String may be any complete JSON value, including an
+object, array, number, boolean, quoted JSON string, or `null` token.
+
+This annotation is a trusted write-only escape hatch. Invalid or attacker-controlled content can
+make the enclosing output invalid or change its structure. Java null still follows the property's
+normal inclusion policy and, when included, is written as JSON `null`.
+
+Reading remains ordinary String-property reading. For example, `{"body":"text"}` can populate the
+field, but an object such as `{"body":{"id":1}}` cannot be read back into it. `JsonRawValue` is not
+a type-use annotation and does not apply to container elements or Map values. It cannot be placed
+on a setter, creator parameter, Any declaration, or the same property occurrence as `JsonCodec`.
+As an occurrence-local representation, it keeps the raw String shape even when the value type has
+an exact builder-registered codec.
+
+`JsonRawValue` does not collect unknown sibling fields. Unknown fields are skipped unless an
+existing `JsonAnyProperty` or `JsonAnyGetter`/`JsonAnySetter` owner captures them. The raw-value and
+Any-property features are independent.
+
+`JsonValue` and `JsonRawValue` may be combined on the same String member to write an owning object
+as a trusted raw root value. That combination is serialization-only: the ordinary one-String
+`JsonCreator` cannot turn an input object or array into a String.
+
+### `JsonBase64`
+
+`JsonBase64` selects a quoted standard Base64 JSON string for one exact `byte[]` field or getter:
+
+```java
+import org.apache.fory.json.annotation.JsonBase64;
+
+public final class Attachment {
+  @JsonBase64
+  public byte[] content;
+}
+```
+
+Bytes `{1, 2, 3}` are written as `{"content":"AQID"}` and decoded back to the original array.
+Fory writes the Base64 characters directly to the JSON output and decodes directly from the JSON
+input without creating an intermediate String. Standard Base64 padding is preserved. Java null
+follows the property's normal inclusion rule and reads from JSON null as null.
+
+The annotation is not a type-use annotation and does not change ordinary unannotated `byte[]`
+properties, container elements, or Map values. It cannot share a logical property with
+`JsonRawValue`, an occurrence `JsonCodec`, or an Any declaration. The equivalent explicit codec is
+`@JsonCodec(Base64ByteArrayCodec.class)`.
+
+### `JsonUnwrapped`
+
+Use `JsonUnwrapped` to place an object-valued property's members directly in the containing JSON
+object:
+
+```java
+import org.apache.fory.json.annotation.JsonUnwrapped;
+
+public final class Person {
+  public int age;
+
+  @JsonUnwrapped(prefix = "name_")
+  public Name name;
+}
+
+public final class Name {
+  public String first;
+  public String last;
+}
+```
+
+This maps `Person` to `{"age":18,"name_first":"Ada","name_last":"Lovelace"}`. The
+optional prefix and suffix apply to each child's final JSON name after `JsonProperty` and the
+configured naming strategy. Nested unwrapped properties compose their transformations from the
+inside out.
+
+A null child writes no members. On input, Fory creates and assigns the child only after seeing one
+of its flattened members. A completely missing group therefore preserves a mutable parent's
+initializer value and leaves a record or creator argument at its normal missing-property default.
+Partial input constructs the child with the ordinary defaults for its other properties.
+
+Mutable classes, records, and `JsonCreator` classes can be parents or children. A parameter-local
+creator parameter may declare a read-only unwrapped group; its required `JsonProperty` value names
+the Java creator argument and is not accepted as a JSON wrapper. A parameterized parent is allowed,
+but every unwrapped child and intermediate must be an exact raw, non-generic class using Fory's
+standard object mapping.
+
+The flattened group occupies one position in the parent's write order. `JsonProperty.index` may
+position it, and `JsonPropertyOrder` selects it by Java logical property name. The child's own
+property order remains intact. Parent fields are matched before flattened fields, which are matched
+before dynamic Any handling.
+
+Fory rejects duplicate or hash-colliding final names, recursive chains made only of unwrapped
+properties, parameterized children, JSON Any children, polymorphic or custom-codec child roots,
+and scalar, array, collection, or Map children. Use `JsonAnyProperty`, `JsonAnyGetter`, or
+`JsonAnySetter` to flatten a Map. `JsonProperty.value`, non-default `JsonProperty.include`, and
+`JsonCodec` are not valid on an unwrapped property; ordinary child leaf properties may still use
+them.
 
 ### Dynamic object members
 
@@ -663,12 +824,16 @@ names must be non-empty and unique, the name count must equal the parameter coun
 must not also declare `JsonProperty`. In parameter-local mode, every parameter requires a
 non-empty, unique `JsonProperty` name.
 
+For a type with `JsonValue`, the empty form also accepts exactly one `String` parameter without
+`JsonProperty` and reconstructs the owning value from its JSON string. This value form is distinct
+from both property-based forms and is inferred only because the target has `JsonValue`.
+
 A creator must have at least one parameter and cannot be varargs or generic. A constructor must be
 public. A factory must be public and static, declare the target class as its exact return type, and
 return a non-null value whose runtime class is exactly the target. Missing reference parameters use
 null, missing primitives use Java zero values, duplicate members use the last value, and explicit
-null for a primitive parameter is rejected. Records use their canonical constructor and cannot
-declare `JsonCreator`.
+null for a primitive parameter is rejected. Records cannot declare a property-based `JsonCreator`;
+a record with `JsonValue` may annotate its one-String canonical constructor for the value form.
 
 ### `JsonSubTypes`
 
@@ -837,17 +1002,16 @@ Registering a custom codec for a `JsonSubTypes` base replaces that base's subtyp
 Registering one for a listed subtype is supported by the two wrapper inclusions but not by inline
 property inclusion.
 
-### Selecting a codec with `JsonCodec`
+### Selecting codecs with `JsonCodec`
 
-Use `@JsonCodec` on a class, record, enum, or interface to declare its default JSON representation:
+Use `@JsonCodec` on a class, record, enum, or interface to declare its default complete-value
+codec. The positional form is shorthand for `value`:
 
 ```java
 import org.apache.fory.json.annotation.JsonCodec;
 
 @JsonCodec(MoneyCodec.class)
-public final class Money {
-  // ...
-}
+public final class Money {}
 
 @JsonCodec(AccountCodec.class)
 public interface Account {}
@@ -855,234 +1019,176 @@ public interface Account {}
 public final class RetailAccount implements Account {}
 ```
 
-The declaration applies at the root and at unannotated nested value positions. It is inherited
-through both superclasses and interfaces, so `RetailAccount` uses `AccountCodec` unless a
-higher-priority choice overrides it. Records and enums use the same declaration form. Fory does
-not rely on Java `@Inherited`, which does not cover interfaces.
+Type declarations are inherited through both superclasses and interfaces. The most-specific
+declaration wins. Unrelated declarations using the same codec are consistent; unrelated
+declarations using different codecs fail instead of depending on reflection order.
 
-Use `@JsonCodec` at a type-use position to change one exact occurrence while retaining the normal
-mapping around it:
+On a field or effective ordinary getter, `value` replaces the complete property value. The same
+annotation is supported on an effective setter value parameter, a `JsonCreator` constructor or
+factory parameter, and a record component through Java's field, accessor, and constructor-parameter
+propagation:
 
 ```java
-import java.util.Collection;
+public final class Invoice {
+  @JsonCodec(MoneyCodec.class)
+  public Money total;
+  private Money tax;
+  private Money discount;
+
+  @JsonCodec(MoneyCodec.class)
+  public Money getTax() {
+    return tax;
+  }
+
+  public void setDiscount(@JsonCodec(MoneyCodec.class) Money discount) {
+    this.discount = discount;
+  }
+
+  @JsonCreator
+  public Invoice(@JsonProperty("total") @JsonCodec(MoneyCodec.class) Money total) {
+    this.total = total;
+  }
+}
+```
+
+Use a child member when the standard container should remain in control and only its direct child
+needs a custom codec:
+
+```java
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.Set;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.atomic.AtomicReferenceArray;
 
-public final class Invoice {
-  public @JsonCodec(MoneyCodec.class) Money total;
+public final class InvoiceGroup {
+  @JsonCodec(elementCodec = MoneyCodec.class)
+  public List<Money> items;
 
-  public List<@JsonCodec(MoneyCodec.class) Money> items;
-  public Set<@JsonCodec(MoneyCodec.class) Money> uniqueItems;
-  public Collection<@JsonCodec(MoneyCodec.class) Money> allItems;
-  public Map<String, @JsonCodec(MoneyCodec.class) Money> byName;
-  public Optional<@JsonCodec(MoneyCodec.class) Money> optional;
-  public AtomicReference<@JsonCodec(MoneyCodec.class) Money> current;
+  @JsonCodec(elementCodec = MoneyCodec.class)
+  public Money[] itemArray;
 
-  // Codec for each Money element.
-  public @JsonCodec(MoneyCodec.class) Money[] itemArray;
+  @JsonCodec(elementCodec = MoneyCodec.class)
+  public AtomicReferenceArray<Money> atomicItems;
 
-  // Codec for the complete Money[] value.
-  public Money @JsonCodec(MoneyArrayCodec.class) [] encodedArray;
+  @JsonCodec(contentCodec = MoneyCodec.class)
+  public Optional<Money> optional;
 
-  // Codec for each complete inner Set<Money> value.
-  public List<@JsonCodec(MoneySetCodec.class) Set<Money>> groups;
+  @JsonCodec(contentCodec = MoneyCodec.class)
+  public AtomicReference<Money> current;
 
-  // Normal containers with a codec only at the leaf.
-  public List<Set<@JsonCodec(MoneyCodec.class) Money>> nestedItems;
+  @JsonCodec(keyCodec = CurrencyKeyCodec.class, valueCodec = MoneyCodec.class)
+  public Map<Currency, Money> byCurrency;
 }
 ```
 
-Every array dimension is a separate type-use node. The same recursive model applies to
-multidimensional arrays, `AtomicReferenceArray`, concrete collection and map implementations, and
-generic container subclasses. Fory follows the actual inherited `Collection<E>` or `Map<K,V>`
-binding, so reordered type parameters still select the intended element or value.
+The child members have these meanings:
 
-For a logical property, annotations from its field, effective getter, effective setter, record
-component, and matching creator parameter are merged after generic substitution. Missing
-annotations are not conflicts. Repeating the same codec at the same resolved node is allowed;
-different codec classes at that node fail metadata construction and identify both sources and the
-nested type path. An annotation on a bound type argument is preserved through fields declared with
-that type variable. The type-use form is supported on field and record-component types, getter
-return types, setter value parameters, and `JsonCreator` constructor or factory value parameters.
+| Member         | Supported current value                           | Direct child handled by the codec |
+| -------------- | ------------------------------------------------- | --------------------------------- |
+| `elementCodec` | `Collection<E>`, `E[]`, `AtomicReferenceArray<E>` | `E`                               |
+| `contentCodec` | `Optional<T>`, `AtomicReference<T>`               | `T`                               |
+| `keyCodec`     | `Map<K, V>`                                       | JSON member name for `K`          |
+| `valueCodec`   | `Map<K, V>`                                       | direct `V` value                  |
 
-Root APIs that accept a `Class` or a Fory `TypeRef` apply class/interface declaration defaults.
-Java `TypeRef` does not preserve arbitrary occurrence annotations, so a root
-`TypeRef<List<@JsonCodec(...) Money>>` cannot provide that nested override. Put the type-use on a
-discovered model property, declare the default on `Money`, or use exact builder registration.
-
-### Selection precedence
-
-For the current resolved value node and target class, the first applicable row wins. An invalid
-higher-priority configuration fails instead of falling back.
-
-| Priority | Source                                                                          | Match                                                                          |
-| -------: | ------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
-|        1 | Current `TYPE_USE @JsonCodec`                                                   | This exact resolved occurrence after property merging and generic substitution |
-|        2 | `registerCodec(Target.class, instance)`                                         | Exact target `Class`; registrations are not inherited                          |
-|        3 | `@JsonCodec` declared directly on the current class, record, enum, or interface | Exact current declaration                                                      |
-|        4 | Inherited class/interface `@JsonCodec`                                          | Deterministic most-specific declaration described below                        |
-|        5 | Existing mapping                                                                | `JsonSubTypes`, built-in/container mapping, then default object mapping        |
-
-Any choice in rows 1 through 4 replaces the complete value mapping, including a built-in,
-container, enum, `JsonSubTypes`, or object mapping. A current type-use, exact builder registration,
-or direct declaration also resolves an otherwise ambiguous inherited configuration without
-evaluating that lower-priority conflict.
-
-Builder registration is exact-class only and remains the path for configured codec instances.
-Registering a codec for a parent or interface does not apply it to descendants.
-
-### Deterministic declaration inheritance
-
-When only inherited declarations remain, Fory considers all annotated proper superclasses and
-interfaces. A declaration is discarded when another candidate declaration is on its Java subtype.
-The remaining most-specific declarations determine the result:
-
-- one candidate wins;
-- multiple candidates naming the same codec class are consistent;
-- incomparable candidates naming different codec classes are an error.
-
-This result never depends on `implements` order or reflection traversal order. A child interface
-declaration overrides its annotated parent, and a child class declaration overrides its annotated
-parent. For superclass/interface combinations:
-
-| Relationship between declaring types            | Codec classes     | Result                                                     |
-| ----------------------------------------------- | ----------------- | ---------------------------------------------------------- |
-| Superclass implements or inherits the interface | Same or different | The superclass declaration is more specific                |
-| Superclass and interface are unrelated          | Same              | Consistent; use the common codec                           |
-| Superclass and interface are unrelated          | Different         | Conflict; a class does not automatically beat an interface |
-
-For example, unrelated interfaces using the same codec are valid, while different codecs conflict:
+A custom Map-key codec converts between the declared key and a JSON member name:
 
 ```java
-@JsonCodec(CommonCodec.class)
-interface A {}
+import java.util.Locale;
+import org.apache.fory.json.codec.MapKeyCodec;
 
-@JsonCodec(CommonCodec.class)
-interface B {}
+public final class CurrencyKeyCodec implements MapKeyCodec {
+  @Override
+  public String toName(Object key) {
+    return ((Currency) key).name().toLowerCase(Locale.ROOT);
+  }
 
-final class ConsistentValue implements A, B {}
-
-@JsonCodec(ACodec.class)
-interface Left {}
-
-@JsonCodec(BCodec.class)
-interface Right {}
-
-// Resolving this type reports both declarations, in stable order.
-final class AmbiguousValue implements Left, Right {}
-```
-
-A child interface or class is more specific than its annotated ancestor:
-
-```java
-@JsonCodec(ParentCodec.class)
-interface Parent {}
-
-@JsonCodec(ChildCodec.class)
-interface Child extends Parent {}
-
-final class ChildValue implements Child {} // ChildCodec
-
-@JsonCodec(BaseCodec.class)
-class Base {}
-
-@JsonCodec(ConcreteCodec.class)
-final class Concrete extends Base {} // ConcreteCodec
-```
-
-Resolve an inherited conflict explicitly in any of three ways:
-
-```java
-// Type-wide declaration for this concrete class.
-@JsonCodec(ConcreteCodec.class)
-final class DeclaredValue implements Left, Right {}
-
-final class Holder {
-  // Only this occurrence.
-  public @JsonCodec(LocalCodec.class) AmbiguousValue value;
-}
-
-// Exact type-wide instance, including configured codecs.
-ForyJson json =
-    ForyJson.builder()
-        .registerCodec(AmbiguousValue.class, new ConcreteCodec())
-        .build();
-```
-
-Like Jackson, Fory preserves useful annotation inheritance across classes and interfaces by
-traversing the Java hierarchy itself. Unlike Jackson's traversal-order first-wins merge, Fory uses
-Java subtype specificity, accepts equal codec classes, and rejects incomparable different codecs.
-Changing `implements` order therefore cannot silently change the JSON representation.
-
-### Composition rules
-
-A selected custom codec owns its entire current value and has no child-delegation API. If source
-code also places an explicit `TYPE_USE @JsonCodec` below that node, metadata construction fails
-because the nested instruction would be hidden, even when it names the same codec:
-
-```java
-public final class Holder {
-  // Invalid: CustomListCodec owns the list, so LocalCodec could never run.
-  public @JsonCodec(CustomListCodec.class)
-      List<@JsonCodec(LocalCodec.class) Money> values;
+  @Override
+  public Object fromName(String name) {
+    return Currency.valueOf(name.toUpperCase(Locale.ROOT));
+  }
 }
 ```
 
-A child type's declaration annotation is different: it is a lazy default rather than an explicit
-instruction at this occurrence. An outer complete codec intentionally prevents that default from
-being resolved, so this is valid:
+Code that used the removed type-use form should move the codec to the owning declaration:
 
 ```java
-@JsonCodec(MoneyCodec.class)
-final class DeclaredMoney {}
+// Before
+List<@JsonCodec(MoneyCodec.class) Money> items;
 
-public final class Holder {
-  public @JsonCodec(CustomListCodec.class) List<DeclaredMoney> values;
-}
+// Now
+@JsonCodec(elementCodec = MoneyCodec.class)
+List<Money> items;
 ```
 
-The same hidden-explicit-descendant rule applies when the outer codec comes from exact builder
-registration or a type declaration. Without an outer custom codec, normal array, collection,
-map-value, Optional, and atomic-reference codecs resolve their annotated children normally.
+Use `contentCodec` for an `Optional` or `AtomicReference`, `valueCodec` for a Map value, and
+`elementCodec` for an array or `AtomicReferenceArray` element.
 
-`@JsonCodec` is a value-codec annotation. An explicit occurrence anywhere in a Map key subtree is
-rejected; declaration defaults and builder registrations for a key type are ignored in key
-position. They still apply when that type appears as a JSON value. For `JsonAnyProperty`,
-`JsonAnyGetter`, or `JsonAnySetter`, only the Map value may select a value codec because the outer
-Map is flattened into its containing object. Wildcard nodes, wildcard bounds, and type variables
-that remain unresolved after substitution cannot select a codec. A type-use written on an
-`extends` or `implements` clause is a hierarchy path rather than a JSON value occurrence and is not
-used; put the annotation on the type declaration instead. Annotation type declarations are not
-supported JSON model targets.
+`Iterable<E>` values that are not `Collection<E>` do not support `elementCodec`. Use `value` when a
+complete codec should own such a value.
 
-### Construction, inherited results, and platforms
+Child configuration is intentionally one level deep. For `List<List<Money>>`, `elementCodec`
+handles each complete `List<Money>`. For `Money[][]`, it handles each `Money[]`. To customize a
+deeper descendant, implement a codec for the complete current value and select it with `value`.
 
-An annotation names a codec class rather than an instance. The class must be public, concrete,
-top-level or static nested, and have a public no-argument constructor. Fory constructs one instance
-per codec implementation class and built `ForyJson`, then shares it across every annotated site and
-concurrent caller. Implementations must be thread-safe. Constructor failures are not cached as
-successful instances; a codec requiring configuration should be passed as an instance through
-`registerCodec`.
+`value` is mutually exclusive with every child member because it already owns the complete current
+value. An empty annotation, an unsupported child member, or an outer complete codec combined with
+a child member fails during model construction. A configured direct child must resolve to a
+concrete type; raw containers, direct wildcards, and unresolved direct type variables are rejected.
 
-In a named Java module, the codec package must be exported or opened to `org.apache.fory.json` so
-the public constructor is accessible. Fory respects closed module boundaries and reports the codec
-class, package, and target module when access is unavailable.
+`JsonAnyProperty` and `JsonAnyGetter` flatten their Map into the enclosing object. Configure their
+dynamic values with `valueCodec`:
 
-An inherited parent or interface codec may be subtype-aware. When it is used for a more specific
-target, each reader result must be null or assignable to that current target. For example, a codec
-declared on non-final `Base` may return a `Child` while decoding `Child`; that succeeds. Returning a
-plain `Base` fails with `ForyJsonException` containing the target type, codec class, declaring type,
-and actual returned class. Fory validates the actual result rather than rejecting inheritance based
-on the codec's generic signature.
+```java
+@JsonAnyProperty
+@JsonCodec(valueCodec = MoneyCodec.class)
+public Map<String, Money> extra;
+```
 
-`@JsonCodec` declaration and type-use discovery is supported on ordinary JVMs and GraalVM native
-images, including inherited declarations and nested type uses. Native object models must follow the
-`JsonType` workflow in the [GraalVM guide](../../docs/guide/java/graalvm-support.md), which registers
-the annotation codec's public no-argument constructor. Android ignores annotation codec sources;
-use exact `registerCodec(Target.class, instance)` registration there.
+The first `JsonAnySetter` parameter is the String property name. Its second parameter may use
+`@JsonCodec(value = ...)` or another configuration valid for that parameter's own shape.
+
+### Codec precedence and repeated declarations
+
+Fory resolves each current value in this order:
+
+| Priority | Source                                    |
+| -------: | ----------------------------------------- |
+|        1 | Current property or parameter `JsonCodec` |
+|        2 | Exact `registerCodec` registration        |
+|        3 | Direct type `JsonCodec` declaration       |
+|        4 | Inherited type declaration                |
+|        5 | Built-in or default JSON mapping          |
+
+One logical property may expose the annotation from its field, getter, setter parameter, creator
+parameter, or record propagation. Repeated configurations must be identical; Fory does not merge
+partial configurations from different declarations. An unannotated effective override suppresses
+an inherited method annotation.
+
+A child member replaces only that direct child. Unconfigured Map siblings continue through the
+normal precedence. If an exact registration or type declaration supplies a complete codec for the
+outer container, a property child member is unreachable and therefore rejected.
+
+Map keys are JSON object member names and use `MapKeyCodec`, not `JsonValueCodec`. A custom key
+codec class follows the same construction rules as a value codec. Null Map keys are rejected, and
+decoded keys must match the declared key type.
+
+### Codec construction and platform support
+
+An annotation codec class must be public, concrete, top-level or static nested, and have a public
+no-argument constructor. One instance is shared by all annotated sites and concurrent operations of
+the built `ForyJson`, so it must be thread-safe. Use `registerCodec(Target.class, instance)` when a
+complete-value codec needs configuration.
+
+In a named Java module, export or open the codec package to `org.apache.fory.json`. When an inherited
+type-declaration codec is used for a more specific target, every decoded value must be null or
+assignable to that target.
+
+The annotation has the same FIELD, METHOD, and PARAMETER behavior on the JVM, Android, and GraalVM
+Native Image. Ordinary Android classes may omit `JsonType` and provide equivalent exact rules;
+Android-desugared Records, including `JsonValue` Records, require `JsonType` and the processor.
+GraalVM object models follow the `JsonType` workflow in the
+[GraalVM guide](../../docs/guide/java/graalvm-support.md).
 
 ## Type validation and untrusted input
 
@@ -1131,7 +1237,7 @@ Jackson object mapping:
 - no pretty-print configuration;
 - no Jackson/Gson annotation compatibility layer;
 - no aliases, views, filters, injection, managed/back references, object identity annotations,
-  root wrapping, format annotations, or annotation-driven raw JSON values;
+  root wrapping, or format annotations;
 - no Fory core `Expose` processing.
 
 Circular graphs eventually fail `maxDepth`; they are not reconstructed. Use Fory core's binary
@@ -1146,6 +1252,8 @@ native or xlang protocol when reference identity or cycles are required.
 | `IllegalArgumentException` from a builder | Depth, concurrency level, or retained buffer limit is not positive                                                                                  |
 | Declared write is rejected                | The value is not assignable to the declared type, the type contains a wildcard/type variable, or null was supplied for a primitive                  |
 | Immutable value is not populated          | Use a record, a valid `JsonCreator`, or an exact custom codec                                                                                       |
+| `JsonValue` read fails                    | Add one plain `String` `JsonCreator`, or register an exact custom codec                                                                             |
+| Raw JSON output is invalid                | Supply exactly one trusted, complete JSON value to the `JsonRawValue` property                                                                      |
 | Ordinary object cannot be constructed     | Add a usable no-argument constructor, use a record or `JsonCreator`, or register a custom codec; Android and GraalVM native image are stricter      |
 | Ordinary accessor annotation fails        | The method is not an eligible public JavaBean accessor, or field mode is enabled                                                                    |
 | Any annotation fails                      | Use exactly one field-backed form or one valid method-backed pair with resolved `Map<String, V>` types; method annotations require non-field mode   |
