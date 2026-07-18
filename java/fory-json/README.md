@@ -345,14 +345,18 @@ original key type. Null map keys are rejected.
 | `withPropertyNamingStrategy(strategy)` | `LOWER_CAMEL_CASE`                                       | Name properties without an explicit `JsonProperty` name              |
 | `withClassLoader(loader)`              | Snapshotted thread context loader, then Fory JSON loader | Resolve annotation-declared subtype class names                      |
 | `maxDepth(int)`                        | `20`                                                     | Maximum nested object/array depth for reads and writes               |
+| `withMaxCachedFieldNames(int)`         | `DEFAULT_MAX_CACHED_FIELD_NAMES` (`8192`)                | Field-name cache entries per reader; zero disables caching           |
 | `withConcurrencyLevel(int)`            | `max(1, 2 * processors)`                                 | Number of reusable concurrent operation states                       |
 | `withBufferSizeLimitBytes(int)`        | 2 MiB                                                    | Maximum reusable capacity retained by each pooled writer             |
 | `registerCodec(type, codec)`           | None                                                     | Replace the exact class's complete JSON codec                        |
+| `registerMixin(mixinType)`             | None                                                     | Apply one annotation Mixin to its exact declared target              |
 | `withTypeChecker(checker)`             | No custom checker                                        | Apply an application type policy in addition to Fory's disallow list |
 
-Depth, concurrency level, and buffer retention limit must be positive. The buffer retention setting
-does not limit JSON input or output size; it only limits reusable writer storage retained after an
-operation. Apply request/body size limits at the transport boundary when parsing untrusted input.
+Depth, concurrency level, and buffer retention limit must be positive. The cached-field-name limit
+applies independently to each reader. It does not limit accepted JSON input; zero disables this
+cache. The buffer retention setting does not limit JSON input or output size; it only limits
+reusable writer storage retained after an operation. Apply request/body size limits at the
+transport boundary when parsing untrusted input.
 
 Builder mutation after `build()` does not modify an existing `ForyJson` runtime.
 
@@ -361,19 +365,82 @@ automatically disabled. Every other builder option keeps the behavior described 
 
 ## JSON annotations
 
-Fory JSON defines fourteen annotations in `org.apache.fory.json.annotation`, including `JsonCodec` for
-complete-value codec selection and `JsonType` for generated model execution and retention.
-They are Fory JSON APIs, not Jackson, Gson, or Fory binary-protocol compatibility annotations.
+Fory JSON provides these mapping annotations in `org.apache.fory.json.annotation`:
+`JsonAnyGetter`, `JsonAnyProperty`, `JsonAnySetter`, `JsonBase64`, `JsonCodec`, `JsonCreator`,
+`JsonIgnore`, `JsonProperty`, `JsonPropertyOrder`, `JsonRawValue`, `JsonSubTypes`, `JsonUnwrapped`,
+and `JsonValue`. `JsonType` is a separate build-time generation marker. They are Fory JSON APIs,
+not Jackson, Gson, or Fory binary-protocol compatibility annotations.
 
 `JsonType` asks the annotation processor to generate direct property and creator operations plus
 exact retention rules. It is not inherited, so annotate each eligible concrete model that needs a
 generated companion. A directly annotated `JsonValue` Record also receives a companion for its
 value accessor and canonical constructor. Ordinary unannotated classes may still use reflection; on
-Android they need application-authored exact R8 rules. Android-desugared Records require `JsonType`
-and the processor. A directly annotated model that uses the default object codec fails during codec
+Android they need application-authored exact R8 rules. Android-desugared Records require
+processor-generated operations from either a direct `JsonType` declaration or a compiled exact
+`JsonMixin` pair. A directly annotated model that uses the default object codec fails during codec
 creation if its generated companion is missing.
 See the [GraalVM guide](../../docs/guide/java/graalvm-support.md) and
 [Android guide](../../docs/guide/java/android-support.md) for the platform workflows.
+
+### Mixins
+
+Use a JSON Mixin to apply Fory JSON mapping annotations to a class without modifying that class:
+
+```java
+import org.apache.fory.json.ForyJson;
+import org.apache.fory.json.annotation.JsonMixin;
+import org.apache.fory.json.annotation.JsonProperty;
+import org.apache.fory.json.annotation.JsonUnwrapped;
+
+@JsonMixin(target = ThirdPartyUser.class)
+abstract class ThirdPartyUserMixin {
+  @JsonProperty("user_id")
+  long id;
+
+  @JsonUnwrapped(prefix = "address_")
+  Address address;
+}
+
+ForyJson json = ForyJson.builder().registerMixin(ThirdPartyUserMixin.class).build();
+```
+
+A Mixin source is a named abstract class or interface, must not be local or anonymous, must not
+extend or implement another type, and is never instantiated. Its annotated fields, methods,
+constructors, and parameters select existing declarations on the exact target. The target continues
+to own all Java types, values, access, and construction. A registration for a base class does not
+affect a subclass, and an interface registration does not affect an implementation.
+
+The source may apply any mapping annotation listed above. Declaring an annotation
+on a matched source declaration replaces the target annotation of the same type as a whole; it does
+not merge individual annotation members. `JsonType` cannot be added or removed by a Mixin.
+
+Use `JsonMixinRemove` when the target's annotation should not be effective in this configuration:
+
+```java
+import org.apache.fory.json.annotation.JsonMixin;
+import org.apache.fory.json.annotation.JsonMixinRemove;
+import org.apache.fory.json.annotation.JsonRawValue;
+
+@JsonMixin(target = ThirdPartyMessage.class)
+abstract class QuotedMessageMixin {
+  @JsonMixinRemove(JsonRawValue.class)
+  String body;
+}
+```
+
+The source selector must match exactly one target declaration even when it only removes an
+annotation. Registering a different Mixin for the same target on one builder replaces the earlier
+registration. Re-registering the same source is harmless. Each `build()` snapshots the current
+last-registration-wins mapping, so later builder changes do not mutate an existing `ForyJson`. An
+empty source is a no-op and clears an earlier source for the same target when registered later.
+
+A `JsonCodec` supplied by a Mixin is the target's effective annotation. An exact
+`registerCodec` registration still wins, while the effective type annotation wins over a built-in
+mapping.
+
+On Android and GraalVM Native Image, compile non-empty Mixins with the Fory annotation processor
+so required generated operations and platform configuration are available. See the platform guides
+linked above.
 
 ### `JsonProperty`
 
@@ -928,20 +995,18 @@ reader. It is not a JSON abstract syntax tree (AST) or `JsonNode` codec. It owns
 including JSON null, but never handles a Map key; `MapKeyCodec` remains responsible for JSON object
 member names.
 
-Implement all five representations with the same JSON shape:
+For an application codec with the same semantics in every representation, extend
+`AbstractJsonValueCodec<T>` and implement the JSON shape once:
 
 ```java
 import java.math.BigDecimal;
-import org.apache.fory.json.codec.JsonValueCodec;
-import org.apache.fory.json.reader.Latin1JsonReader;
-import org.apache.fory.json.reader.Utf16JsonReader;
-import org.apache.fory.json.reader.Utf8JsonReader;
-import org.apache.fory.json.writer.StringJsonWriter;
-import org.apache.fory.json.writer.Utf8JsonWriter;
+import org.apache.fory.json.codec.AbstractJsonValueCodec;
+import org.apache.fory.json.reader.JsonReader;
+import org.apache.fory.json.writer.JsonWriter;
 
-public final class MoneyCodec implements JsonValueCodec<Money> {
+public final class MoneyCodec extends AbstractJsonValueCodec<Money> {
   @Override
-  public void writeString(StringJsonWriter writer, Money value) {
+  public void write(JsonWriter writer, Money value) {
     if (value == null) {
       writer.writeNull();
     } else {
@@ -950,26 +1015,7 @@ public final class MoneyCodec implements JsonValueCodec<Money> {
   }
 
   @Override
-  public void writeUtf8(Utf8JsonWriter writer, Money value) {
-    if (value == null) {
-      writer.writeNull();
-    } else {
-      writer.writeBigDecimal(value.amount);
-    }
-  }
-
-  @Override
-  public Money readLatin1(Latin1JsonReader reader) {
-    return reader.tryReadNullToken() ? null : new Money(reader.readBigDecimal());
-  }
-
-  @Override
-  public Money readUtf16(Utf16JsonReader reader) {
-    return reader.tryReadNullToken() ? null : new Money(reader.readBigDecimal());
-  }
-
-  @Override
-  public Money readUtf8(Utf8JsonReader reader) {
+  public Money read(JsonReader reader) {
     return reader.tryReadNullToken() ? null : new Money(reader.readBigDecimal());
   }
 }
@@ -982,6 +1028,10 @@ final class Money {
   }
 }
 ```
+
+`AbstractJsonValueCodec` adds one virtual method call per operation. For a
+performance-sensitive codec, or when behavior depends on a concrete reader or writer, implement
+`JsonValueCodec<T>` directly and provide all five representation-specific methods.
 
 ```java
 import org.apache.fory.json.ForyJson;
@@ -1152,13 +1202,13 @@ The first `JsonAnySetter` parameter is the String property name. Its second para
 
 Fory resolves each current value in this order:
 
-| Priority | Source                                    |
-| -------: | ----------------------------------------- |
-|        1 | Current property or parameter `JsonCodec` |
-|        2 | Exact `registerCodec` registration        |
-|        3 | Direct type `JsonCodec` declaration       |
-|        4 | Inherited type declaration                |
-|        5 | Built-in or default JSON mapping          |
+| Priority | Source                                            |
+| -------: | ------------------------------------------------- |
+|        1 | Current property or parameter `JsonCodec`         |
+|        2 | Exact `registerCodec` registration                |
+|        3 | Exact-target type `JsonCodec` after Mixin overlay |
+|        4 | Inherited-frontier type `JsonCodec` declaration   |
+|        5 | Built-in or default JSON mapping                  |
 
 One logical property may expose the annotation from its field, getter, setter parameter, creator
 parameter, or record propagation. Repeated configurations must be identical; Fory does not merge
@@ -1185,9 +1235,10 @@ type-declaration codec is used for a more specific target, every decoded value m
 assignable to that target.
 
 The annotation has the same FIELD, METHOD, and PARAMETER behavior on the JVM, Android, and GraalVM
-Native Image. Ordinary Android classes may omit `JsonType` and provide equivalent exact rules;
-Android-desugared Records, including `JsonValue` Records, require `JsonType` and the processor.
-GraalVM object models follow the `JsonType` workflow in the
+Native Image. Ordinary Android classes may omit `JsonType` and provide equivalent exact rules.
+Android-desugared Records, including `JsonValue` Records, require processor-generated operations
+from either a direct `JsonType` declaration or a compiled exact `JsonMixin` pair. GraalVM object
+models follow the build-time workflow in the
 [GraalVM guide](../../docs/guide/java/graalvm-support.md).
 
 ## Type validation and untrusted input
@@ -1249,7 +1300,7 @@ native or xlang protocol when reference identity or cycles are required.
 | ----------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `ForyJsonException` while parsing         | Invalid JSON grammar, type mismatch, unsupported mapping, depth violation, or trailing content; inspect the message and target type                 |
 | `InsecureException`                       | Fory's disallow list or the configured `JsonTypeChecker` rejected a class                                                                           |
-| `IllegalArgumentException` from a builder | Depth, concurrency level, or retained buffer limit is not positive                                                                                  |
+| `IllegalArgumentException` from a builder | Check the configured depth, concurrency, retained-buffer, and cached-field-name limits                                                              |
 | Declared write is rejected                | The value is not assignable to the declared type, the type contains a wildcard/type variable, or null was supplied for a primitive                  |
 | Immutable value is not populated          | Use a record, a valid `JsonCreator`, or an exact custom codec                                                                                       |
 | `JsonValue` read fails                    | Add one plain `String` `JsonCreator`, or register an exact custom codec                                                                             |
