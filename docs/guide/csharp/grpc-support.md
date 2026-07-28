@@ -39,7 +39,7 @@ Server project:
 
 ```xml
 <ItemGroup>
-  <PackageReference Include="Apache.Fory" Version="1.3.0" />
+  <PackageReference Include="Apache.Fory" Version="1.4.0" />
   <PackageReference Include="Grpc.AspNetCore" Version="2.71.0" />
 </ItemGroup>
 ```
@@ -48,7 +48,7 @@ Client project:
 
 ```xml
 <ItemGroup>
-  <PackageReference Include="Apache.Fory" Version="1.3.0" />
+  <PackageReference Include="Apache.Fory" Version="1.4.0" />
   <PackageReference Include="Grpc.Core.Api" Version="2.71.0" />
   <PackageReference Include="Grpc.Net.Client" Version="2.71.0" />
 </ItemGroup>
@@ -128,7 +128,7 @@ public sealed class GreeterService : Greeter.GreeterBase
 
 Generated request and response types are registered by the generated schema
 module used by the service companion, so service implementations do not perform
-manual serializer registration.
+custom serializer registration.
 
 ## Create a Client
 

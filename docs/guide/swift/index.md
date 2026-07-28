@@ -27,7 +27,8 @@ Apache Fory Swift provides high-performance object graph serialization with stro
 - `@ForyStruct`, `@ForyEnum`, and `@ForyUnion` macros for zero-boilerplate model serialization
 - Xlang protocol compatibility with Java, Rust, Go, Python, and more
 - Compatible mode for schema evolution across versions
-- Built-in support for dynamic values (`Any`, `AnyObject`, `any Serializer`, `AnyHashable`)
+- External structural, custom, and recursively composed carrier serializers
+- Built-in support for dynamic values and arbitrary application protocol existentials
 - Reference tracking for shared/circular graphs, including weak references on classes
 
 ## Install
@@ -55,6 +56,7 @@ targets: [
 - [Xlang Serialization](xlang-serialization.md)
 - [Schema Metadata](schema-metadata.md)
 - [Type Registration](type-registration.md)
+- [External-Type Serialization](external-types.md)
 - [Custom Serializers](custom-serializers.md)
 - [Shared and Circular References](references.md)
 - [Polymorphism and Dynamic Types](polymorphism.md)
@@ -73,7 +75,7 @@ struct User: Equatable {
 }
 
 let fory = Fory()
-fory.register(User.self, id: 1)
+try fory.register(User.self, id: 1)
 
 let input = User(name: "alice", age: 30)
 let data = try fory.serialize(input)

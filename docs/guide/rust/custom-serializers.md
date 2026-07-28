@@ -19,158 +19,186 @@ license: |
   limitations under the License.
 ---
 
-For types that don't support `#[derive(ForyStruct)]`, implement the `Serializer` trait manually.
+Use a custom serializer when derive cannot express the type's serialized
+representation or when an opaque encoding is intentional. A serializer is a
+type-level implementation and names the value it handles through `Target`.
 
-## When to Use Custom Serializers
+For a public third-party struct or enum whose schema should remain structural,
+prefer [External-Type Serialization](external-types.md).
 
-- External types from other crates
-- Types with special serialization requirements
-- Existing data format compatibility
-- Performance-critical custom encoding
+## Implement a Custom Serializer
 
-## Implementing the Serializer Trait
+This example uses a local type as its own serializer:
 
 ```rust
-use fory::{Error, Fory, ForyDefault, ReadContext, Serializer, TypeResolver, WriteContext};
-use std::any::Any;
+use fory::{Error, Fory, ReadContext, Serializer, WriteContext};
 
-#[derive(Debug, PartialEq, Default)]
-struct CustomType {
+#[derive(Debug, PartialEq)]
+struct Point {
     value: i32,
-    name: String,
 }
 
-impl Serializer for CustomType {
-    fn fory_write_data(&self, context: &mut WriteContext) -> Result<(), Error> {
-        context.writer.write_i32(self.value);
-        context.writer.write_var_u32(self.name.len() as u32);
-        context.writer.write_utf8_string(&self.name);
+impl Serializer for Point {
+    type Target = Self;
+
+    fn write_data(value: &Self, context: &mut WriteContext) -> Result<(), Error> {
+        context.writer.write_i32(value.value);
         Ok(())
     }
 
-    fn fory_read_data(context: &mut ReadContext) -> Result<Self, Error> {
-        let value = context.reader.read_i32()?;
-        let len = context.reader.read_var_u32()? as usize;
-        let name = context.reader.read_utf8_string(len)?;
-        Ok(Self { value, name })
+    fn read_data(context: &mut ReadContext) -> Result<Self, Error> {
+        Ok(Self {
+            value: context.reader.read_i32()?,
+        })
     }
 
-    fn fory_type_id_dyn(&self, type_resolver: &TypeResolver) -> Result<fory::TypeId, Error> {
-        Self::fory_get_type_id(type_resolver)
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
+    fn default_value(_context: &mut ReadContext) -> Result<Self, Error> {
+        Ok(Self { value: 0 })
     }
 }
 
-// ForyDefault delegates to Default
-impl ForyDefault for CustomType {
-    fn fory_default() -> Self {
-        Self::default()
-    }
-}
-```
-
-> **Note**: When implementing `ForyDefault` manually, ensure your type also implements `Default` if you use `Self::default()`.
-> Alternatively, you can construct a default instance directly in `fory_default()`.
->
-> **Tip**: If your type supports `#[derive(ForyStruct)]`, you can use `#[fory(generate_default)]` to automatically generate both `ForyDefault` and `Default` implementations.
-
-## Manual Serializers and Arc Any
-
-If a manually registered serializer needs its type to round-trip behind
-`Arc<dyn Any + Send + Sync>` or preserve `UnknownCase` payloads, implement the
-send-sync Any reader and return the concrete value as a boxed `Any` value:
-
-```rust
-impl Serializer for CustomType {
-    fn fory_read_data_as_send_sync_any(
-        context: &mut ReadContext,
-    ) -> Result<Box<dyn Any + Send + Sync>, Error> {
-        Ok(Box::new(Self::fory_read_data(context)?))
-    }
-
-    // Implement the ordinary Serializer methods as shown above.
-    // ...
-}
-```
-
-Do not override this method for values that contain fields whose types are not
-`Send + Sync`, such as `Rc<T>`, `RcWeak<T>`, `RefCell<T>`, or `Cell<T>`.
-
-## Registering Custom Serializers
-
-```rust
 let mut fory = Fory::builder().xlang(false).build();
-fory.register_serializer::<CustomType>(100)?;
+fory.register_serializer::<Point>(100)?;
 
-let custom = CustomType {
-    value: 42,
-    name: "test".to_string(),
-};
-let bytes = fory.serialize(&custom)?;
-let decoded: CustomType = fory.deserialize(&bytes)?;
-assert_eq!(custom, decoded);
+let value = Point { value: 42 };
+let bytes = fory.serialize(&value)?;
+let decoded: Point = fory.deserialize(&bytes)?;
+assert_eq!(decoded, value);
+# Ok::<(), Error>(())
 ```
 
-## WriteContext and ReadContext
+`write_data` and `read_data` handle the EXT body. Fory's complete-value
+`write` and `read` operations supply the root or field reference and
+type-information framing.
 
-The `WriteContext` and `ReadContext` provide access to:
+`default_value` is optional. Implement it only when a null or missing
+compatible field has a meaningful value. It receives the active `ReadContext`,
+so a default that allocates can apply the same deserialization limits as a
+normal read.
 
-- **writer/reader**: Binary buffer operations
-- **type_resolver**: Type registration information
-- **ref_resolver**: Reference tracking (for shared/circular references)
+## Serialize a Third-Party Opaque Type
 
-### Common Writer Methods
+A separate serializer can target a type from another crate:
 
 ```rust
-// Primitive types
+use fory::{Error, ReadContext, Serializer, WriteContext};
+
+struct UuidSerializer;
+
+#[cold]
+#[inline(never)]
+fn invalid_uuid(error: uuid::Error) -> Error {
+    Error::invalid_data(error.to_string())
+}
+
+impl Serializer for UuidSerializer {
+    type Target = uuid::Uuid;
+
+    fn write_data(
+        value: &uuid::Uuid,
+        context: &mut WriteContext,
+    ) -> Result<(), Error> {
+        context.writer.write_bytes(value.as_bytes());
+        Ok(())
+    }
+
+    fn read_data(context: &mut ReadContext) -> Result<uuid::Uuid, Error> {
+        let bytes = context.reader.read_bytes(16)?;
+        uuid::Uuid::from_slice(bytes).map_err(invalid_uuid)
+    }
+}
+```
+
+Register the serializer, then select it at the root or field:
+
+```rust
+fory.register_serializer::<UuidSerializer>(101)?;
+
+let bytes = fory.serialize_with::<UuidSerializer>(&uuid)?;
+let decoded =
+    fory.deserialize_with::<UuidSerializer>(&bytes)?;
+```
+
+```rust
+#[derive(ForyStruct)]
+struct Request {
+    #[fory(with = UuidSerializer)]
+    id: uuid::Uuid,
+}
+```
+
+Custom serializer bodies are opaque. Compatible mode does not map fields
+inside them.
+
+## Support `Arc<dyn Any + Send + Sync>`
+
+If a custom serializer's target must be materialized behind
+`Arc<dyn Any + Send + Sync>` or a synchronized application trait, implement
+`read_arc_any`:
+
+```rust
+use std::any::Any;
+use std::sync::Arc;
+
+impl Serializer for Point {
+    type Target = Self;
+
+    // Implement write_data, read_data, and any desired default as above.
+
+    fn read_arc_any(
+        context: &mut ReadContext,
+    ) -> Result<Arc<dyn Any + Send + Sync>, Error> {
+        Ok(Arc::new(Self::read_data(context)?))
+    }
+}
+```
+
+The target must implement `Send + Sync`. If this method is omitted, typed,
+`Box`, and `Rc` operations remain available, while synchronized `Arc`
+materialization returns an error.
+
+## Registration by Name
+
+Use name registration when the serialized identity is a qualified name:
+
+```rust
+fory.register_serializer_by_name::<UuidSerializer>(
+    "example.Uuid",
+)?;
+```
+
+One `Fory` instance can register at most one serializer for a target.
+
+## Context Access
+
+`WriteContext` and `ReadContext` expose the binary writer and reader:
+
+```rust
 context.writer.write_i8(value);
-context.writer.write_i16(value);
 context.writer.write_i32(value);
-context.writer.write_i64(value);
-context.writer.write_f32(value);
-context.writer.write_f64(value);
-context.writer.write_bool(value);
-
-// Variable-length integers
-context.writer.write_var_i32(value);
 context.writer.write_var_u32(value);
+context.writer.write_f64(value);
 
-// Strings
-context.writer.write_utf8_string(&string);
+let value = context.reader.read_i8()?;
+let value = context.reader.read_i32()?;
+let value = context.reader.read_var_u32()?;
+let value = context.reader.read_f64()?;
 ```
 
-### Common Reader Methods
+For variable-size bodies, validate readable bytes and graph-memory limits
+before allocating from an encoded length.
 
-```rust
-// Primitive types
-let value = context.reader.read_i8();
-let value = context.reader.read_i16();
-let value = context.reader.read_i32();
-let value = context.reader.read_i64();
-let value = context.reader.read_f32();
-let value = context.reader.read_f64();
-let value = context.reader.read_bool();
-
-// Variable-length integers
-let value = context.reader.read_var_i32();
-let value = context.reader.read_var_u32();
-
-// Strings
-let string = context.reader.read_utf8_string(len);
-```
-
-## Best Practices
-
-1. **Use variable-length encoding** for integers that may be small
-2. **Write length first** for variable-length data
-3. **Handle errors properly** in read methods
-4. **Implement ForyDefault** for schema evolution support
+When a custom serializer is selected as a child of a variable-size carrier,
+the carrier must emit at least one aggregate byte per declared element or map
+entry after its count. Fory rejects serialization when the carrier's complete
+header, metadata, framing, and child bodies are shorter than that count, so it
+never emits bytes that the paired allocation-safety check cannot read. Fixed
+arrays are exempt because their validated count does not control an
+allocation; zero-sized elements in `Vec`, `VecDeque`, and `BinaryHeap` are also
+exempt because those carriers allocate no backing storage for them.
 
 ## Related Topics
 
-- [Type Registration](type-registration.md) - Registering serializers
-- [Basic Serialization](basic-serialization.md) - Using ForyStruct derive
-- [Schema Evolution](schema-evolution.md) - Compatible mode
+- [External-Type Serialization](external-types.md)
+- [Type Registration](type-registration.md)
+- [Schema Evolution](schema-evolution.md)

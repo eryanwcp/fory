@@ -52,15 +52,31 @@ class User {
 
 Enums defined in the same file are automatically included in the generated registration.
 
+For a class owned by another library, define an
+[external structural serializer](external-types.md) with
+`@ForyStruct(target: ExternalType)`.
+
+## Inherited Fields
+
+An ordinary `@ForyStruct()` flattens its concrete superclass and applied-mixin
+fields into one generated child schema. Public inherited fields require no
+annotation on the parent.
+
+See [Struct Inheritance](inheritance.md) for private fields,
+`ignoreInheritedPrivateFields`, cross-library access, constructors, mixins, and
+schema compatibility.
+
 ## Step 2 — Run the Generator
 
 From the directory that contains your `pubspec.yaml`:
 
 ```bash
-dart run build_runner build --delete-conflicting-outputs
+dart run build_runner build
 ```
 
-This emits a `.fory.dart` file next to your source file. Re-run this command any time you add or rename annotated types.
+This emits a `.fory.dart` file next to your source file. Re-run this command any
+time you add or rename annotated types, change hierarchy storage, or change an
+exposure boundary or `ignoreInheritedPrivateFields`.
 
 ## Step 3 — Register and Use
 
@@ -103,12 +119,20 @@ class Event {
 
 When using evolving structs, also assign stable field IDs with `@ForyField(id: ...)` before you ship your first payload — those IDs are how Fory matches fields after a schema change.
 
-## When Not to Use Code Generation
+Included inherited and direct fields share this one ID namespace. Do not reuse
+an ID among fields included in the same child schema.
 
-If you cannot annotate a type (e.g., it comes from a package you do not own), write a [Custom Serializer](custom-serializers.md) instead.
+## Choosing Generated or Custom Serialization
+
+Use an [external structural serializer](external-types.md) when another
+package's class exposes matching public getters and a safe public construction
+path. Use a [custom serializer](custom-serializers.md) when the wire body,
+field names, values, or construction need custom logic.
 
 ## Related Topics
 
+- [Struct Inheritance](inheritance.md)
 - [Type Registration](type-registration.md)
+- [External-Type Serialization](external-types.md)
 - [Schema Metadata](schema-metadata.md)
 - [Schema Evolution](schema-evolution.md)

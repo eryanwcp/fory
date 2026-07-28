@@ -9,7 +9,11 @@
     "format": "prettier --write \"{packages,test}/**/*.ts\" && eslint . --fix",
     "format-check": "prettier --check \"{packages,test}/**/*.ts\" && eslint ."
   },
-  "repository": "git@github.com:apache/fory.git",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/apache/fory.git",
+    "directory": "javascript"
+  },
   "workspaces": [
     "packages/hps",
     "packages/core"
@@ -28,7 +32,13 @@
   },
   "overrides": {
     "@typescript-eslint/typescript-estree": {
-      "minimatch": "^9.0.9"
+      "minimatch": "^10.2.5"
+    },
+    "editorconfig": {
+      "minimatch": "^10.2.5"
+    },
+    "glob@^10.0.0": {
+      "minimatch": "^10.2.5"
     }
   }
 }

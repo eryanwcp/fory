@@ -1,6 +1,6 @@
 ---
 title: Troubleshooting
-sidebar_position: 11
+sidebar_position: 13
 id: troubleshooting
 license: |
   Licensed to the Apache Software Foundation (ASF) under one or more
@@ -33,7 +33,7 @@ The writer is sending a native-mode payload. Make sure every peer writes the xla
 
 Fory does not know how to serialize or deserialize this type. Fix it by:
 
-1. Running code generation if you haven't: `dart run build_runner build --delete-conflicting-outputs`
+1. Running code generation if you haven't: `dart run build_runner build`
 2. Calling the generated `register` function (or `registerSerializer`) for the type **before** calling `serialize` or `deserialize`.
 3. Registering **all** types that appear in a message, not just the root type. For example, if `Order` contains an `Address`, register both.
 
@@ -42,11 +42,71 @@ Fory does not know how to serialize or deserialize this type. Fix it by:
 Regenerate code:
 
 ```bash
-cd dart/packages/fory
-dart run build_runner build --delete-conflicting-outputs
+dart run build_runner build
 ```
 
-If you moved files or renamed types, rebuild before re-running analysis or tests.
+Run the command from the package that owns the source. If a dependency exposes
+private hierarchy fields, generate that provider package first and ensure its
+published source contains the generated `.fory.dart` part, then regenerate the
+consumer. If you moved files, renamed types, or changed a hierarchy, rebuild
+before re-running analysis or tests.
+
+## Inherited private field is not accessible
+
+Ordinary hierarchy discovery includes private storage even when it is declared
+in another Dart library. Privacy affects generated access, not whether the
+field exists in the schema.
+
+Same-library private fields need no parent annotation. For a cross-library
+field, expose it from its declaring library with `exposePrivateFields: true` and
+make the generated companion visible to the child. If the child intentionally
+excludes all private ancestor state, set
+`ignoreInheritedPrivateFields: true` on that child instead.
+
+See [Struct Inheritance](inheritance.md) for complete access, omission, and
+multi-library rules.
+
+## Final inherited field cannot be reconstructed
+
+A final or `late final` field that remains in the schema must receive its
+decoded value
+unchanged from a parameter of the concrete child's selected generative
+constructor. Fory can follow initializing formals, super formals, redirects,
+and direct constructor initializers across the hierarchy.
+
+A parameter with the same name and type is insufficient if it is unused or its
+value is cast, transformed, or passed through a function. Forward the decoded
+value directly to the exact field, mark the field declaration with
+`@ForyField(ignore: true)`, or use a custom serializer. If
+`ignoreInheritedPrivateFields` removes the only serialized source for a
+required constructor parameter, Fory still reports this error rather than
+inventing a value. See
+[Constructors and Final Fields](inheritance.md#constructors-and-final-fields).
+
+## Inherited field is hidden
+
+A subclass field or accessor can hide an included ancestor storage slot while
+both physical slots remain on the object. Fory rejects this shape instead of
+choosing one slot and losing the other. Rename or remove the hiding member,
+ignore the ancestor field at its declaration, or use a custom serializer. For
+private ancestor state, setting `ignoreInheritedPrivateFields: true` omits all
+private ancestor storage from that child schema.
+
+## External target generation fails
+
+An external structural serializer requires:
+
+- an `abstract final` serializer declaration with `late final` schema fields;
+- a concrete imported target class;
+- an accessible target getter with the same name and exact Dart type for every
+  field;
+- a public generative constructor whose parameters map to fields, or a
+  zero-required-argument constructor plus matching setters.
+
+Select a public named constructor with
+`@ForyStruct(target: Type, constructor: 'name')`. Use a
+[custom serializer](custom-serializers.md) when the target requires a factory,
+private state, field conversion, or name translation.
 
 ## `Deserialized value has type ..., expected ...`
 
@@ -125,7 +185,7 @@ matrix and platform guidance.
 Main Dart package:
 
 ```bash
-dart run build_runner build --delete-conflicting-outputs
+dart run build_runner build
 dart analyze
 dart test
 ```
@@ -134,7 +194,7 @@ Integration test package:
 
 ```bash
 cd dart/packages/fory-test
-dart run build_runner build --delete-conflicting-outputs
+dart run build_runner build
 dart test
 ```
 
@@ -156,6 +216,7 @@ separate protobuf service endpoint for generic protobuf clients.
 
 ## Related Topics
 
+- [Struct Inheritance](inheritance.md)
 - [Xlang Serialization](xlang-serialization.md)
 - [Code Generation](code-generation.md)
 - [Custom Serializers](custom-serializers.md)

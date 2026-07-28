@@ -147,7 +147,7 @@ let later = timestamp.checked_add_duration(duration)?;
 
 ```toml
 [dependencies]
-fory = { version = "1.3.0", features = ["chrono"] }
+fory = { version = "1.4.0", features = ["chrono"] }
 ```
 
 ### Custom Types
@@ -180,6 +180,29 @@ let mut reader = Reader::new(&buf);
 let decoded: MyStruct = fory.deserialize_from(&mut reader)?;
 ```
 
+When the Rust value type uses an external structural serializer or custom
+serializer, select it explicitly at the root:
+
+```rust
+let bytes = fory.serialize_with::<UserSerializer>(&user)?;
+let decoded: third_party::User =
+    fory.deserialize_with::<UserSerializer>(&bytes)?;
+```
+
+Carrier serializers compose the same selection for a root container:
+
+```rust
+use fory::VecSerializer;
+
+let bytes =
+    fory.serialize_with::<VecSerializer<UserSerializer>>(&users)?;
+let decoded: Vec<third_party::User> =
+    fory.deserialize_with::<VecSerializer<UserSerializer>>(&bytes)?;
+```
+
+See [External-Type Serialization](external-types.md) for field annotations,
+all supported carriers, and registration.
+
 ## Performance Tips
 
 - **Zero-Copy Deserialization**: Row format enables direct memory access without copying
@@ -192,4 +215,5 @@ let decoded: MyStruct = fory.deserialize_from(&mut reader)?;
 
 - [Type Registration](type-registration.md) - Registering types
 - [References](references.md) - Shared and circular references
-- [Custom Serializers](custom-serializers.md) - Manual serialization
+- [Custom Serializers](custom-serializers.md) - Custom serialization
+- [External-Type Serialization](external-types.md) - Third-party values and carrier roots

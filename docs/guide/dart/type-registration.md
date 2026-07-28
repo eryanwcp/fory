@@ -1,6 +1,6 @@
 ---
 title: Type Registration
-sidebar_position: 6
+sidebar_position: 8
 id: type_registration
 license: |
   Licensed to the Apache Software Foundation (ASF) under one or more
@@ -65,9 +65,34 @@ Call the generated `register` function from the `.fory.dart` file. It installs a
 UserModelsForyModule.register(fory, User, id: 100);
 ```
 
+For an ordinary inherited type, register the concrete annotated child. Its
+generated serializer already owns the complete flattened child schema; Fory
+does not require runtime registration of a superclass or mixin merely because
+it contributes fields.
+
+Register an independently annotated concrete parent only when values whose
+runtime type is that parent are also serialized. A provider-only
+`@ForyStruct(exposePrivateFields: true)` boundary supplies generated field
+access and has no registration entry of its own. See
+[Struct Inheritance](inheritance.md) for boundary and child-schema options.
+
+External structural serializers use the same generated registration API. Pass
+the external target type:
+
+```dart
+ExternalSerializersForyModule.register(
+  fory,
+  third_party.User,
+  id: 100,
+);
+```
+
+See [External-Type Serialization](external-types.md) for the declaration.
+
 ## Registering a Custom Serializer
 
-For types that you cannot annotate with `@ForyStruct()`, pass a serializer instance directly:
+Pass a serializer instance directly when a type needs custom wire or
+construction logic:
 
 ```dart
 fory.registerSerializer(
@@ -83,6 +108,8 @@ See [Custom Serializers](custom-serializers.md) for how to implement a serialize
 
 - Register **before** the first `serialize` or `deserialize` call.
 - Register **every** class that can appear in a message, not only the root type.
+- Do not register generated private-field access companions; register only
+  concrete serialized types.
 - Keep IDs (or names) **stable** once payloads are persisted or exchanged across services. Changing them will break deserialization of old messages.
 - Do not mix a numeric ID on one side with a name on the other for the same type.
 
@@ -92,6 +119,8 @@ The same numeric ID or name must be used in every peer that reads or writes the 
 
 ## Related Topics
 
+- [Struct Inheritance](inheritance.md)
 - [Code Generation](code-generation.md)
+- [External-Type Serialization](external-types.md)
 - [Xlang Serialization](xlang-serialization.md)
 - [Custom Serializers](custom-serializers.md)

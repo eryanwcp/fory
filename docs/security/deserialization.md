@@ -287,6 +287,41 @@ type-erased materialization paths reserve the shallow storage for the heap value
 Parents must not recursively include child object, collection, map, string, binary, or primitive
 dense-array contents; the child owner reserves its own shallow memory when it is materialized.
 
+### Generated Structural Targets
+
+Wire members and physical storage are separate inputs. Properties, accessors, interfaces, and
+logical schema aliases are not physical fields and must not be charged as storage. A field that is
+both serialized and stored is counted once. A storage-only declaration contributes its field width
+but must not enter wire metadata or generated reads and writes.
+
+For C# ordinary classes, each directly annotated class owns the physical instance fields declared
+by that class. An inheritable class provider publishes the cumulative parent-provider value plus
+those direct fields. A sealed concrete serializer uses the same cumulative expression privately.
+A concrete descendant uses the immediate accessible provider value and its own direct fields; it
+must not enumerate referenced private metadata or reconstruct parent storage. The concrete object
+serializer reserves one shallow object owner plus this cumulative field storage.
+
+A C# external class declaration owns the exact third-party physical fields it lists. An exact
+field mapping contributes storage. A visible property mapping does not, so its backing field must
+be listed separately. An ignored mapping must identify one exact class field and is storage-only.
+External struct declarations support visible member mappings only.
+Discoverable unmapped public instance fields may be added once. A `BaseOnly` declaration can own
+the complete target and target-ancestor prefix used by an ordinary child. It must list every
+non-public physical field in that prefix; the generator does not scan the referenced assembly for
+private layout.
+
+Exact external private identities are version-pinned package ABI assertions. Runtime wire access
+uses exact accessors and must not fall back to reflection, layout probing, or a different member.
+Storage-only private declarations have no runtime accessor, so the application must validate them
+against the pinned package version.
+
+Dart generators may additionally include public instance fields visible on the target at
+generation time. Swift macros cannot inspect another type's stored layout and therefore use only
+the external declaration. In every runtime, these formulas are resolved during generation and
+must not add reflection, layout probing, allocation, or field enumeration to deserialization hot
+paths. The normal owner rules still apply: a reference target reserves its shallow owner and field
+storage, while an inline value target is charged by the holder that owns its storage.
+
 ### Runtime-Specific Owner Notes
 
 #### C++
@@ -314,6 +349,20 @@ counts; nested value container headers are charged as parent inline fields or ou
 Boxed, reference-counted, and type-erased materialization paths reserve `size_of::<T>()` for the heap
 payload they create. Compile-time `size_of::<T>()` formulas are acceptable in those allocation
 owners, but value serializers should not add a parallel self-reserve for the same `T`.
+
+Count-derived Rust collection and map owners require at least the declared element or entry count in
+readable bytes after the count. Apply that gate exactly once before reservation or allocation; do
+not repeat it after reading shared metadata. Their serializers must symmetrically reject a value
+when its complete post-count header, metadata, framing, and body are shorter than the count,
+including a non-zero-sized target whose custom serializer emits a compact or empty body. Use one
+aggregate writer check per variable carrier, never a per-element check.
+
+Fixed arrays do not allocate from their validated wire count and omit this proportional gate.
+`Vec`, `VecDeque`, and `BinaryHeap` also omit it for zero-sized elements because they create no
+count-derived backing allocation in that case. `LinkedList`, `HashSet`, `BTreeSet`, `HashMap`, and
+`BTreeMap` retain the gate for node, bucket, entry, or duplicate-processing work. Implementations
+must not substitute guessed node costs, padding bytes, a global compact-body bypass, or a second
+collection or map codec.
 
 #### Swift
 

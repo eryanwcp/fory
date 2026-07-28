@@ -10,7 +10,73 @@ Load this file when changing `dart/`.
 - Do not design different user-facing generated-registration behavior for Dart VM and Flutter/no-mirrors. Cross-platform registration flow must stay consistent.
 - Users must never be required to call private generated helpers such as `_ensure...` or `_install...`.
 - If `Fory.register(...)` cannot be made self-sufficient across Dart platforms, use an explicit public wrapper API rather than splitting VM and Flutter behavior.
-- Generated registration is ownership-based: generated types register through `Fory.register(...)`, manual or custom serializers use `Fory.registerSerializer(...)`, and generated descriptors/support helpers stay internal.
+- Generated registration is ownership-based: generated types register through `Fory.register(...)`, custom serializers use `Fory.registerSerializer(...)`, and generated descriptors/support helpers stay internal.
+- Dart external-type serialization uses `ForyStruct.target` on an `abstract final`
+  schema declaration. The declaration is compile-time input only; generated
+  serializers, schemas, and module dispatch are parameterized and registered
+  by the target type. Keep ordinary and external structs in one analyzed model
+  and emitter, with direct target getter/constructor/setter code and the
+  existing resolver, field, carrier, reference, and compatible-read paths. Do
+  not add runtime declaration instances, callbacks, member lookup, target-copy
+  objects, a second registration API, or a second carrier/root flow.
+- Ordinary `ForyStruct` generation must discover every real instance storage
+  field on the concrete superclass and applied-mixin chain before considering
+  Dart accessibility. Enumerate each instantiated hierarchy layer's declared
+  fields; do not use only the child `element.fields`, `allSupertypes`, member
+  lookup, import visibility, or privacy as field discovery.
+- Process each discovered ordinary field through one owner path: apply its
+  declaration-owned `ForyField(ignore: true)`, then the concrete child's
+  `ignoreInheritedPrivateFields` policy, substitute the concrete generic type,
+  resolve direct or companion access, prove construction, then build the
+  concrete child's one globally sorted flattened schema. The child policy
+  omits every ancestor- or applied-mixin-declared private field, including
+  same-library fields, but never child-declared private or inherited public
+  fields. Never omit a remaining field because it is inaccessible, final,
+  hidden, or unsupported; report a generation error.
+- `ignoreInheritedPrivateFields` defaults to false, belongs only to an ordinary
+  concrete schema owner, and is not inherited from ancestor annotations.
+  Reject true on external and provider-only abstract, open-generic, or mixin
+  declarations. Filtering must happen before substitution and access
+  resolution, without changing complete hierarchy discovery.
+- Public inherited fields and private inherited fields declared in the child's
+  library use direct generated access without a parent annotation.
+  Included cross-library private storage requires
+  `ForyStruct(exposePrivateFields: true)` on a public hierarchy boundary in
+  that field's declaring library. The companion emits only public typed static
+  getter/setter access for its own library's private state and owns no schema,
+  serializer, construction, registration, reference, or graph-memory state.
+  Companion generation is independent of a consumer's omission policy. Each
+  declaring library in a multi-library hierarchy must provide its own
+  boundary. A consumer exposure annotation cannot authorize another library's
+  field.
+- An included ordinary `final` or `late final` field must receive its decoded
+  value unchanged from the selected concrete-child constructor through
+  element-proven field formals, super formals, redirects, or explicit
+  initializer/super arguments. Names are not bindings. Do not post-set final
+  state, invent a required constructor source after filtering, use reflection,
+  or fall back when identity flow cannot be proven.
+- The concrete ordinary child owns one flattened schema, serializer,
+  constructor reconstruction, reference publication path, and graph-memory
+  object charge. Included inherited reference metadata enters the existing
+  recursive reference analysis once; omitted fields do not. Do not add
+  reference state, change `ReadContext` or serializer reference-call contracts,
+  or invoke a parent serializer for inheritance.
+- Keep external target fields explicit. Ordinary hierarchy discovery and
+  `exposePrivateFields` must never scan or expose an external target hierarchy,
+  and `ignoreInheritedPrivateFields` is invalid with `target`.
+- Across packages, generate and publish the provider library's `.fory.dart`
+  part before building a consumer that uses its private-field access companion.
+  A direct import or re-export must expose both the public boundary and
+  companion.
+- Constructor-based external structural serializers must reject every
+  statically provable reference-tracked path back to the target, including
+  paths through supported list, set, and map type arguments. Do not simulate
+  early publication with placeholders or final-field patching.
+- External object graph-memory formulas count all declaration fields plus
+  concrete public instance fields visible on the target, superclass, and mixin
+  storage paths. Ignored declaration fields are budget-only and must not enter
+  target access, construction, metadata, or wire code. Compute this union during
+  generation and emit one constant reservation.
 - Keep root numeric wrapper defaults separate from generated field metadata. Root wrapper resolution belongs in the builtin resolver, while annotations and generated metadata choose fixed, tagged, or declared-field encodings.
 - Dart 64-bit carriers are optimized for each platform. Do not replace native extension-type wrappers with allocation-heavy classes or route web/native hot paths through `BigInt` unless the user approves a representation change.
 - In `Buffer`, cursor, serializer, and generated-code hot paths, prefer direct byte/local integer operations and conditional import/export files over callbacks, records, holder objects, wrapper round-trips, or runtime platform branches.

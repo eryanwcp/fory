@@ -1,6 +1,6 @@
 ---
 title: Schema Evolution
-sidebar_position: 8
+sidebar_position: 10
 id: schema_evolution
 license: |
   Licensed to the Apache Software Foundation (ASF) under one or more
@@ -62,6 +62,14 @@ class UserProfile {
 
 If you add field IDs after payloads are already in production, existing stored messages won't have them and evolution won't work correctly.
 
+For an ordinary inherited struct, assign IDs across every field included in
+the concrete child's flattened schema. An ID used by an included parent or
+mixin field cannot be reused by the child.
+
+For an [external structural serializer](external-types.md), the local
+serializer declaration supplies the evolving schema and each declaration field
+must match the corresponding target property.
+
 ## What You Can Safely Change
 
 **Safe changes** (compatible on both sides):
@@ -79,6 +87,9 @@ If you add field IDs after payloads are already in production, existing stored m
   values exactly.
 - Change the registration identity (`id` or `name`) of a type after messages are in production.
 - Change a field's logical meaning without changing its ID.
+- Introduce field hiding that leaves both an ancestor and child storage slot;
+  generation rejects this shape because both slots cannot be addressed
+  faithfully.
 
 ## Xlang Notes
 
@@ -98,8 +109,27 @@ Use `compatible: false` only when every reader and writer always uses the same s
 final fory = Fory(compatible: false);
 ```
 
+## Regenerating Inherited Schemas
+
+Regenerate every affected `.fory.dart` part after adding inherited storage,
+changing a superclass or mixin, changing `exposePrivateFields`, or changing
+`ignoreInheritedPrivateFields`. Generate a dependency package's provider part
+before building consumers that include its private fields.
+
+Enabling `ignoreInheritedPrivateFields` removes every private ancestor and
+applied-mixin field from that concrete child's generated schema. Disabling it
+adds those fields back and may require provider companions. Compatible schemas
+use their normal missing-field and unknown-field behavior. Fixed-schema peers
+must change together because the resulting field list is different. A parent
+annotation does not propagate this setting to children.
+
+This option changes generated field selection only. It does not change the
+runtime reference protocol or add a compatibility reader.
+
 ## Related Topics
 
+- [Struct Inheritance](inheritance.md)
 - [Configuration](configuration.md)
+- [External-Type Serialization](external-types.md)
 - [Schema Metadata](schema-metadata.md)
 - [Xlang Serialization](xlang-serialization.md)

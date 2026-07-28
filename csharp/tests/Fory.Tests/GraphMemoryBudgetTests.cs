@@ -19,6 +19,7 @@ using System.Buffers;
 using System.Collections.Immutable;
 using System.Runtime.CompilerServices;
 using Apache.Fory;
+using Fory.ExternalTypes;
 using ForyRuntime = Apache.Fory.Fory;
 using S = Apache.Fory.Schema.Types;
 
@@ -67,6 +68,12 @@ public struct BudgetValue
 public sealed class BudgetValueHolder
 {
     public BudgetValue Value { get; set; }
+}
+
+[ForyStruct]
+public sealed class NullableValueHolder
+{
+    public int? Value { get; set; }
 }
 
 [ForyStruct]
@@ -163,6 +170,7 @@ public sealed class GraphMemoryBudgetTests
             .Register<GeneratedPackedListBudget>(1007)
             .Register<GeneratedSchemaMapBudget>(1008)
             .Register<BudgetValueHolder>(1009)
+            .Register<NullableValueHolder>(1015)
             .Register<BudgetSelfNode>(1012);
     }
 
@@ -206,6 +214,90 @@ public sealed class GraphMemoryBudgetTests
 
         List<List<string>> value = Enumerable.Range(0, 3).Select(_ => new List<string>()).ToList();
         Assert.Equal(value.Count, NewFory().Deserialize<List<List<string>>>(Serialize(value)).Count);
+    }
+
+    [Fact]
+    public void ExternalStructRootBudget()
+    {
+        ExternalPoint value = new() { X = 1, Y = 2 };
+        ForyRuntime writer = ForyRuntime.Builder().Compatible(false).Build();
+        writer.Register<ExternalPoint>(1013);
+        byte[] bytes = writer.Serialize(value);
+        ForyRuntime reader = ForyRuntime.Builder()
+            .Compatible(false)
+            .MaxGraphMemoryBytes(1)
+            .Build();
+        reader.Register<ExternalPoint>(1013);
+
+        Assert.Equal(value, reader.Deserialize<ExternalPoint>(bytes));
+    }
+
+    [Fact]
+    public void ExternalStructListBudget()
+    {
+        List<ExternalPoint> value =
+        [
+            new ExternalPoint { X = 1, Y = 2 },
+            new ExternalPoint { X = 3, Y = 4 },
+        ];
+        ForyRuntime writer = ForyRuntime.Builder().Compatible(false).Build();
+        writer.Register<ExternalPoint>(1013);
+        byte[] bytes = writer.Serialize(value);
+        long required = ListBudget<ExternalPoint>(value.Count);
+
+        ForyRuntime tooSmall = ForyRuntime.Builder()
+            .Compatible(false)
+            .MaxGraphMemoryBytes(required - 1)
+            .Build();
+        tooSmall.Register<ExternalPoint>(1013);
+        Assert.Throws<InvalidDataException>(
+            () => tooSmall.Deserialize<List<ExternalPoint>>(bytes));
+
+        ForyRuntime exact = ForyRuntime.Builder()
+            .Compatible(false)
+            .MaxGraphMemoryBytes(required)
+            .Build();
+        exact.Register<ExternalPoint>(1013);
+        Assert.Equal(value, exact.Deserialize<List<ExternalPoint>>(bytes));
+    }
+
+    [Fact]
+    public void ExternalClassStorageBudget()
+    {
+        ExternalBudgetValue publicState = new() { Left = 1, Right = 2 };
+        ExternalBudgetValue hiddenState = new() { Left = 3, Right = 4 };
+        ExternalBudgetModel value = new(hiddenState)
+        {
+            Value = 7,
+            PublicState = publicState,
+            BaseState = new ExternalBudgetValue { Left = 5, Right = 6 },
+        };
+        ForyRuntime writer = ForyRuntime.Builder().Compatible(false).Build();
+        writer.Register<ExternalBudgetModel>(1014);
+        byte[] bytes = writer.Serialize(value);
+        long required =
+            ObjectOwnerBytes
+            + sizeof(int)
+            + 3L * Unsafe.SizeOf<ExternalBudgetValue>();
+
+        ForyRuntime tooSmall = ForyRuntime.Builder()
+            .Compatible(false)
+            .MaxGraphMemoryBytes(required - 1)
+            .Build();
+        tooSmall.Register<ExternalBudgetModel>(1014);
+        Assert.Throws<InvalidDataException>(
+            () => tooSmall.Deserialize<ExternalBudgetModel>(bytes));
+
+        ForyRuntime exact = ForyRuntime.Builder()
+            .Compatible(false)
+            .MaxGraphMemoryBytes(required)
+            .Build();
+        exact.Register<ExternalBudgetModel>(1014);
+        ExternalBudgetModel decoded = exact.Deserialize<ExternalBudgetModel>(bytes);
+        Assert.Equal(value.Value, decoded.Value);
+        Assert.Equal(default(ExternalBudgetValue), decoded.PublicState);
+        Assert.Equal(default(ExternalBudgetValue), decoded.BaseState);
+        Assert.Equal(default(ExternalBudgetValue), decoded.ReadHiddenState());
     }
 
     [Fact]
@@ -340,6 +432,20 @@ public sealed class GraphMemoryBudgetTests
         byte[] holderBytes = Serialize(holder);
         Assert.Throws<InvalidDataException>(() => NewFory(BudgetValueHolderBytes - 1).Deserialize<BudgetValueHolder>(holderBytes));
         Assert.Equal(holder.Value.Id, NewFory(BudgetValueHolderBytes).Deserialize<BudgetValueHolder>(holderBytes).Value.Id);
+    }
+
+    [Fact]
+    public void NullableValueStorageUsesFullWidth()
+    {
+        NullableValueHolder holder = new() { Value = 9 };
+        byte[] bytes = Serialize(holder);
+        long required = ObjectOwnerBytes + Unsafe.SizeOf<int?>();
+
+        Assert.Throws<InvalidDataException>(
+            () => NewFory(required - 1).Deserialize<NullableValueHolder>(bytes));
+        Assert.Equal(
+            holder.Value,
+            NewFory(required).Deserialize<NullableValueHolder>(bytes).Value);
     }
 
     [Fact]

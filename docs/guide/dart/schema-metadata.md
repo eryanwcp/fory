@@ -1,6 +1,6 @@
 ---
 title: Schema Metadata
-sidebar_position: 5
+sidebar_position: 7
 id: schema_metadata
 license: |
   Licensed to the Apache Software Foundation (ASF) under one or more
@@ -21,11 +21,19 @@ license: |
 
 Add `@ForyField(...)` to a field inside a `@ForyStruct()` class to change how that field is serialized.
 
+For ordinary inheritance, metadata stays with the storage declaration and is
+applied when any concrete annotated child discovers that field. A child
+redeclaration does not replace or merge the ancestor field's metadata. See
+[Struct Inheritance](inheritance.md) for inherited-field inclusion rules.
+
+The same annotations apply to fields in an
+[external structural serializer declaration](external-types.md).
+
 ## Quick Reference
 
 ```dart
 @ForyField(
-  skip: false,      // include the field; set true to exclude it
+  ignore: false,    // include the field; set true to exclude it
   id: 10,           // stable field ID for schema evolution
   nullable: true,   // override nullability detection
   ref: true,        // enable reference tracking for this field
@@ -33,12 +41,21 @@ Add `@ForyField(...)` to a field inside a `@ForyStruct()` class to change how th
 )
 ```
 
-## `skip`
+## `ignore`
 
-Exclude a field from serialization entirely. Useful for cached, computed, or UI-only values that should not land in a persisted or transmitted message.
+Exclude the declaring field from serialization entirely. This is the only
+per-field, declaration-owned omission and applies to every concrete child that
+discovers the field. Useful examples include cached, computed, or UI-only
+values that should not land in a persisted or transmitted message.
+
+For child-specific omission of all private ancestor fields, see
+[`ignoreInheritedPrivateFields`](inheritance.md#ignoring-inherited-private-fields).
+Omitted physical storage still contributes to shallow graph-memory accounting.
+Because a declaration-ignored field has no wire representation, do not combine
+`ignore` with other `ForyField` options.
 
 ```dart
-@ForyField(skip: true)
+@ForyField(ignore: true)
 String cachedDisplayName = '';
 ```
 
@@ -52,6 +69,10 @@ String name = '';
 ```
 
 Once a payload is shared across services, never reuse an `id` for a different field.
+
+An ordinary child has one flattened field namespace. IDs must therefore be
+unique across all fields included from its child, superclass, and
+applied-mixin declarations.
 
 ## `nullable`
 
@@ -74,6 +95,10 @@ List<Object?> sharedNodes = <Object?>[];
 ```
 
 Note: scalar types like `int`, `double`, and `bool` never benefit from reference tracking even if `ref: true` is set.
+
+An included inherited `ref` annotation behaves exactly like the same
+annotation on a field declared directly by the concrete child. See
+[Struct Inheritance](inheritance.md#references-and-graph-memory).
 
 ## `dynamic`
 
@@ -140,6 +165,8 @@ When the same model is defined in multiple languages:
 
 ## Related Topics
 
+- [Struct Inheritance](inheritance.md)
 - [Code Generation](code-generation.md)
+- [External-Type Serialization](external-types.md)
 - [Schema Evolution](schema-evolution.md)
 - [Xlang Serialization](xlang-serialization.md)

@@ -81,11 +81,20 @@ fory.Register<Order>(101);
 
 - Register user-defined types on both writer and reader sides.
 - Keep ID/name mappings consistent across services and languages.
+- For external-type serialization, register the third-party target, such as
+  `fory.Register<ThirdParty.User>(100)`, not the local serializer declaration.
+- Register a concrete derived class by its concrete type. Annotated abstract
+  bases and external declarations with `BaseOnly = true` are schema providers
+  for descendants and are not registered.
+- Annotate every first-party class in a serializable hierarchy directly.
+  Registering a derived class does not make an unannotated base class
+  serializable.
 - For the split overloads, `typeName` must be non-empty and must not contain dots.
 - Register before high-volume serialization workloads to avoid missing type metadata.
 
 ## Related Topics
 
 - [Basic Serialization](basic-serialization.md)
+- [External Types](external-types.md)
 - [Custom Serializers](custom-serializers.md)
 - [Xlang Serialization](xlang-serialization.md)

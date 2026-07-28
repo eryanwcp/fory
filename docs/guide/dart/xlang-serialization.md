@@ -1,6 +1,6 @@
 ---
 title: Xlang Serialization
-sidebar_position: 4
+sidebar_position: 6
 id: xlang_serialization
 license: |
   Licensed to the Apache Software Foundation (ASF) under one or more
@@ -58,6 +58,34 @@ ModelsForyModule.register(
 ```
 
 Do not mix the two strategies for the same type across implementations.
+
+## External Types
+
+For a struct class owned by another Dart package, define an
+[external structural serializer](external-types.md) and register the target
+with the same ID or name used by every peer:
+
+```dart
+@ForyStruct(target: third_party.User)
+abstract final class UserSerializer {
+  @ForyField(id: 1)
+  late final String name;
+
+  @ForyField(id: 2, type: Int32Type())
+  late final int age;
+}
+
+ExternalSerializersForyModule.register(
+  fory,
+  third_party.User,
+  id: 100,
+);
+```
+
+The declaration's field IDs, names, nullability, and wire-width annotations
+define the Dart-side xlang schema. An external declaration may explicitly list
+an accessible inherited target property, but Fory does not automatically scan
+the external target hierarchy.
 
 ## Dart to Java Example
 
@@ -163,6 +191,19 @@ Fory matches fields by name or by stable field ID. For robust cross-language int
 5. Use `Timestamp`, `LocalDate`, and `Duration` for temporal fields rather than raw `DateTime`.
 6. Validate real round trips across all languages before shipping.
 
+For an ordinary Dart class, Fory flattens concrete superclass and applied-mixin
+storage into the annotated child's one struct schema. Parent and child fields
+share one field-ID namespace and one canonical ordering, so the peer language
+should define the equivalent included flat field set. Fields omitted by
+`@ForyField(ignore: true)` or the concrete child's
+`ignoreInheritedPrivateFields` option are absent from that peer schema. A
+parent is not encoded as a nested object.
+
+Included inherited `@ForyField(ref: true)` and nested container reference
+metadata use the same reference behavior as fields declared directly on the
+child. Inheritance does not change xlang reference framing or add parent-level
+reference state.
+
 ## Type Mapping Notes for Dart
 
 Because Dart `int` is not itself a promise about the exact xlang wire width, prefer explicit field metadata when exact cross-language interpretation matters:
@@ -207,13 +248,15 @@ Before relying on a cross-language contract in production, test a payload end-to
 Run the Dart side:
 
 ```bash
-dart run build_runner build --delete-conflicting-outputs
+dart run build_runner build
 dart analyze
 dart test
 ```
 
 ## Related Topics
 
+- [Struct Inheritance](inheritance.md)
 - [Type Registration](type-registration.md)
+- [External-Type Serialization](external-types.md)
 - [Schema Evolution](schema-evolution.md)
 - [Xlang guide](../xlang/index.md)

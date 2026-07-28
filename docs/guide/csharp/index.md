@@ -26,7 +26,9 @@ Apache Fory™ C# is a high-performance, cross-language serialization library fo
 - High performance binary serialization for .NET 8+
 - Xlang compatibility with Fory implementations in Java, Python, C++, Go, Rust,
   JavaScript/TypeScript, Swift, Dart, Scala, and Kotlin
-- Source-generator-based serializers for `[ForyStruct]` types, plus `[ForyEnum]` and `[ForyUnion]` registration
+- Source-generator-based serializers for `[ForyStruct]` types, plus
+  `[ForyEnum]` and `[ForyUnion]` registration
+- Generated serializers for external class, struct, and enum targets
 - Optional reference tracking for shared and circular object graphs
 - Compatible mode for schema evolution
 - Thread-safe wrapper (`ThreadSafeFory`) for multi-threaded services
@@ -44,7 +46,7 @@ Reference the single `Apache.Fory` package. It includes the Fory library and the
 
 ```xml
 <ItemGroup>
-  <PackageReference Include="Apache.Fory" Version="1.3.0" />
+  <PackageReference Include="Apache.Fory" Version="1.4.0" />
 </ItemGroup>
 ```
 
@@ -91,6 +93,7 @@ User decoded = fory.Deserialize<User>(payload);
 | [Xlang Serialization](xlang-serialization.md) | Interoperability guidance                     |
 | [Schema Metadata](schema-metadata.md)         | `[ForyField]` ids and schema type descriptors |
 | [Type Registration](type-registration.md)     | Registering user types and custom serializers |
+| [External Types](external-types.md)           | Serializers for third-party types             |
 | [Custom Serializers](custom-serializers.md)   | Implementing `Serializer<T>`                  |
 | [References](references.md)                   | Shared/circular reference handling            |
 | [Schema Evolution](schema-evolution.md)       | Compatible mode behavior                      |

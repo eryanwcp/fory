@@ -1,6 +1,6 @@
 ---
 title: Supported Types
-sidebar_position: 7
+sidebar_position: 9
 id: supported_types
 license: |
   Licensed to the Apache Software Foundation (ASF) under one or more
@@ -130,7 +130,24 @@ class User {
 }
 ```
 
-See [Code Generation](code-generation.md).
+Ordinary annotated classes may extend classes and apply mixins. Fory discovers
+every concrete instance storage field from that hierarchy, including inherited
+generic fields after specialization, then builds one child schema. See
+[Struct Inheritance](inheritance.md) for private-field access and omission.
+
+Abstract getters, interfaces, static members, and other declarations without
+instance storage are not fields. Every field that remains after explicit
+omission must have a supported type, an unambiguous access path, and a valid
+reconstruction path; otherwise generation fails. In particular, each included
+`final` or `late final` field must receive the decoded value unchanged through
+the concrete child's constructor chain.
+
+See [Code Generation](code-generation.md) for generator setup.
+
+Classes owned by another library can use an
+[external structural serializer](external-types.md) when their public fields
+and construction match a local Fory schema declaration. External declarations
+list their schema fields explicitly and do not scan the target hierarchy.
 
 ## Collections
 
@@ -154,6 +171,7 @@ width is one of the most common cross-language bugs.
 
 ## Related Topics
 
+- [Struct Inheritance](inheritance.md)
 - [Schema Metadata](schema-metadata.md)
 - [Xlang Serialization](xlang-serialization.md)
 - [Schema Evolution](schema-evolution.md)
